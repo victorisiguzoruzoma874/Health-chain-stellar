@@ -2,11 +2,18 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { ConfigService } from '@nestjs/config';
+import { ThrottlerExceptionFilter } from './throttler/throttler-exception.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
   const logger = new Logger('Bootstrap');
+
+  if (configService.get<string>('TRUST_PROXY', 'false') === 'true') {
+    app.getHttpAdapter().getInstance().set('trust proxy', 1);
+  }
+
+  app.useGlobalFilters(new ThrottlerExceptionFilter());
 
   // Global validation pipe
   app.useGlobalPipes(
