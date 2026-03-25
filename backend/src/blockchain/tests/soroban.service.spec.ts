@@ -64,7 +64,9 @@ describe('SorobanService', () => {
     });
 
     it('should reject duplicate submissions', async () => {
-      mockIdempotencyService.checkAndSetIdempotencyKey.mockResolvedValueOnce(false);
+      mockIdempotencyService.checkAndSetIdempotencyKey.mockResolvedValueOnce(
+        false,
+      );
 
       const job: SorobanTxJob = {
         contractMethod: 'register_blood',
@@ -141,9 +143,13 @@ describe('SorobanService', () => {
       };
 
       // First call succeeds
-      mockIdempotencyService.checkAndSetIdempotencyKey.mockResolvedValueOnce(true);
+      mockIdempotencyService.checkAndSetIdempotencyKey.mockResolvedValueOnce(
+        true,
+      );
       // Second call fails (duplicate)
-      mockIdempotencyService.checkAndSetIdempotencyKey.mockResolvedValueOnce(false);
+      mockIdempotencyService.checkAndSetIdempotencyKey.mockResolvedValueOnce(
+        false,
+      );
 
       const result1 = await service.submitTransaction(job);
       expect(result1).toBe('job-123');
@@ -334,20 +340,24 @@ describe('SorobanService', () => {
       };
 
       // First submission succeeds
-      mockIdempotencyService.checkAndSetIdempotencyKey.mockResolvedValueOnce(true);
+      mockIdempotencyService.checkAndSetIdempotencyKey.mockResolvedValueOnce(
+        true,
+      );
       const jobId1 = await service.submitTransaction(job);
       expect(jobId1).toBe('job-123');
 
       // Duplicate submission fails
-      mockIdempotencyService.checkAndSetIdempotencyKey.mockResolvedValueOnce(false);
+      mockIdempotencyService.checkAndSetIdempotencyKey.mockResolvedValueOnce(
+        false,
+      );
       await expect(service.submitTransaction(job)).rejects.toThrow(
         'Duplicate submission',
       );
 
       // Verify idempotency service was called
-      expect(mockIdempotencyService.checkAndSetIdempotencyKey).toHaveBeenCalledWith(
-        idempotencyKey,
-      );
+      expect(
+        mockIdempotencyService.checkAndSetIdempotencyKey,
+      ).toHaveBeenCalledWith(idempotencyKey);
     });
 
     it('should expose queue metrics for admin monitoring', async () => {

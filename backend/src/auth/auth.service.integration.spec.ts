@@ -68,14 +68,16 @@ describe('AuthService - Refresh Token Race Condition (Integration)', () => {
       ]);
 
       // One should succeed, one should fail
-      const succeeded = [result1, result2].filter(r => r.status === 'fulfilled');
-      const failed = [result1, result2].filter(r => r.status === 'rejected');
+      const succeeded = [result1, result2].filter(
+        (r) => r.status === 'fulfilled',
+      );
+      const failed = [result1, result2].filter((r) => r.status === 'rejected');
 
       expect(succeeded).toHaveLength(1);
       expect(failed).toHaveLength(1);
 
       // Verify the failed one has the correct error
-      const failedResult = failed[0] as PromiseRejectedResult;
+      const failedResult = failed[0];
       expect(failedResult.reason).toBeInstanceOf(UnauthorizedException);
       expect(failedResult.reason.message).toBe('INVALID_REFRESH_TOKEN');
     });
@@ -100,7 +102,9 @@ describe('AuthService - Refresh Token Race Condition (Integration)', () => {
       );
 
       // New token should work
-      const secondRefresh = await authService.refreshToken(refreshResult.refresh_token);
+      const secondRefresh = await authService.refreshToken(
+        refreshResult.refresh_token,
+      );
       expect(secondRefresh.access_token).toBeDefined();
       expect(secondRefresh.refresh_token).toBeDefined();
     });
@@ -145,15 +149,15 @@ describe('AuthService - Refresh Token Race Condition (Integration)', () => {
 
       const results = await Promise.allSettled(promises);
 
-      const succeeded = results.filter(r => r.status === 'fulfilled');
-      const failed = results.filter(r => r.status === 'rejected');
+      const succeeded = results.filter((r) => r.status === 'fulfilled');
+      const failed = results.filter((r) => r.status === 'rejected');
 
       expect(succeeded).toHaveLength(1);
       expect(failed).toHaveLength(9);
 
       // All failures should have the correct error
-      failed.forEach(result => {
-        const failedResult = result as PromiseRejectedResult;
+      failed.forEach((result) => {
+        const failedResult = result;
         expect(failedResult.reason).toBeInstanceOf(UnauthorizedException);
       });
     });
@@ -165,10 +169,12 @@ describe('AuthService - Refresh Token Race Condition (Integration)', () => {
         role: 'admin',
       });
 
-      const refreshResult = await authService.refreshToken(loginResult.refresh_token);
+      const refreshResult = await authService.refreshToken(
+        loginResult.refresh_token,
+      );
 
       // Decode the new access token
-      const decoded = jwtService.decode(refreshResult.access_token) as any;
+      const decoded = jwtService.decode(refreshResult.access_token);
 
       expect(decoded.email).toBe('test@example.com');
       expect(decoded.role).toBe('admin');

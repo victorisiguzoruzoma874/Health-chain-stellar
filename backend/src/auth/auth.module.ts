@@ -25,7 +25,6 @@ import { RedisModule } from '../redis/redis.module';
         return {
           secret: configService.get<string>('JWT_SECRET') ?? 'default-secret',
           signOptions: {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             expiresIn: expiresIn as any,
           },
         };

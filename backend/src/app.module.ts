@@ -13,6 +13,7 @@ import { RidersModule } from './riders/riders.module';
 import { DispatchModule } from './dispatch/dispatch.module';
 import { MapsModule } from './maps/maps.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { BloodUnitsModule } from './blood-units/blood-units.module';
 import { BullModule } from '@nestjs/bullmq';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from './auth/guards/permissions.guard';
@@ -48,6 +49,7 @@ import { PermissionsGuard } from './auth/guards/permissions.guard';
     RidersModule,
     DispatchModule,
     MapsModule,
+    BloodUnitsModule,
     BullModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

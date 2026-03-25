@@ -110,7 +110,7 @@ export class PermissionsService {
     // Replace permission list
     const permissionEntities = permissions.map((permission) => {
       const entity = this.rolePermissionRepository.create({ permission });
-      entity.role = roleEntity as RoleEntity;
+      entity.role = roleEntity;
       return entity;
     });
 

@@ -20,7 +20,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
-  ) { }
+  ) {}
 
   async validateUser(email: string, password: string): Promise<unknown> {
     // TODO: Query user from DB and verify hashed password
@@ -37,7 +37,9 @@ export class AuthService {
       role: loginDto.role ?? 'donor',
     };
 
-    const accessToken = this.jwtService.sign(payload as unknown as Record<string, unknown>);
+    const accessToken = this.jwtService.sign(
+      payload as unknown as Record<string, unknown>,
+    );
     const refreshToken = await this.generateRefreshToken(payload);
 
     return {
@@ -69,18 +71,30 @@ export class AuthService {
       // Atomic consumption using Redis SET NX
       // Use the refresh token itself as the key (or its hash if it's extremely long)
       const tokenKey = `refresh_token:${refreshToken}`;
-      const expiresAt = payload.exp ? payload.exp - Math.floor(Date.now() / 1000) : 604800;
+      const expiresAt = payload.exp
+        ? payload.exp - Math.floor(Date.now() / 1000)
+        : 604800;
       const ttl = Math.max(expiresAt, 0);
 
       // set(key, value, 'EX', ttl, 'NX') returns 'OK' if set, null if exists
-      const consumed = await this.redis.set(tokenKey, '1', 'EX', ttl || 604800, 'NX');
+      const consumed = await this.redis.set(
+        tokenKey,
+        '1',
+        'EX',
+        ttl || 604800,
+        'NX',
+      );
 
       if (!consumed) {
-        this.logger.warn(`Replay attack detected for user ${payload.email}. Token already consumed.`);
+        this.logger.warn(
+          `Replay attack detected for user ${payload.email}. Token already consumed.`,
+        );
         throw new UnauthorizedException('INVALID_REFRESH_TOKEN');
       }
 
-      this.logger.log(`Refresh token consumed for user ${payload.email}. Rotating tokens.`);
+      this.logger.log(
+        `Refresh token consumed for user ${payload.email}. Rotating tokens.`,
+      );
 
       const newPayload: JwtPayload = {
         sub: payload.sub,
@@ -113,8 +127,9 @@ export class AuthService {
       { ...payload, jti } as unknown as Record<string, unknown>,
       {
         secret:
-          this.configService.get<string>('JWT_REFRESH_SECRET') ?? 'refresh-secret',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          this.configService.get<string>('JWT_REFRESH_SECRET') ??
+          'refresh-secret',
+
         expiresIn: refreshExpiresIn as any,
       },
     );
