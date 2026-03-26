@@ -9,6 +9,7 @@ import { SorobanDlqProcessor } from './processors/soroban-dlq.processor';
 import { SorobanTxProcessor } from './processors/soroban-tx.processor';
 import { IdempotencyService } from './services/idempotency.service';
 import { SorobanService } from './services/soroban.service';
+import { JobDeduplicationPlugin } from './plugins/job-deduplication.plugin';
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { SorobanService } from './services/soroban.service';
   providers: [
     SorobanService,
     IdempotencyService,
+    JobDeduplicationPlugin,
     SorobanTxProcessor,
     SorobanDlqProcessor,
     AdminGuard,

@@ -3,6 +3,7 @@
 import { getQueueToken } from '@nestjs/bull';
 import { Test, TestingModule } from '@nestjs/testing';
 
+import { JobDeduplicationPlugin } from '../plugins/job-deduplication.plugin';
 import { IdempotencyService } from '../services/idempotency.service';
 import { SorobanService } from '../services/soroban.service';
 import { SorobanTxJob } from '../types/soroban-tx.types';
@@ -20,6 +21,9 @@ describe('SorobanService', () => {
   };
   let mockIdempotencyService: {
     checkAndSetIdempotencyKey: jest.Mock;
+  };
+  let mockDeduplicationPlugin: {
+    checkAndSetJobDedup: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -42,6 +46,10 @@ describe('SorobanService', () => {
       checkAndSetIdempotencyKey: jest.fn().mockResolvedValue(true),
     };
 
+    mockDeduplicationPlugin = {
+      checkAndSetJobDedup: jest.fn().mockResolvedValue(true),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SorobanService,
@@ -56,6 +64,10 @@ describe('SorobanService', () => {
         {
           provide: IdempotencyService,
           useValue: mockIdempotencyService,
+        },
+        {
+          provide: JobDeduplicationPlugin,
+          useValue: mockDeduplicationPlugin,
         },
       ],
     }).compile();

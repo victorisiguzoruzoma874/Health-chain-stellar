@@ -8,6 +8,7 @@ import {
 } from '../types/soroban-tx.types';
 
 import { IdempotencyService } from './idempotency.service';
+import { JobDeduplicationPlugin } from '../plugins/job-deduplication.plugin';
 
 import type { Queue } from 'bull';
 
@@ -22,6 +23,7 @@ export class SorobanService {
     @InjectQueue('soroban-tx-queue') private txQueue: Queue,
     @InjectQueue('soroban-dlq') private dlq: Queue,
     private idempotencyService: IdempotencyService,
+    private deduplicationPlugin: JobDeduplicationPlugin,
   ) {}
 
   /**
@@ -43,6 +45,20 @@ export class SorobanService {
         `Duplicate submission detected for idempotency key: ${job.idempotencyKey}`,
       );
       throw new Error('Duplicate submission - idempotency key already exists');
+    }
+
+    // Check for duplicate job within dedup window
+    const isDedupNew = await this.deduplicationPlugin.checkAndSetJobDedup(
+      job.contractMethod,
+      job.args,
+    );
+
+    if (!isDedupNew) {
+      this.logger.warn(
+        `Duplicate job suppressed (within dedup window): ${job.contractMethod}`,
+        { idempotencyKey: job.idempotencyKey },
+      );
+      throw new Error('Duplicate job - equivalent job enqueued recently');
     }
 
     const maxRetries = job.maxRetries ?? this.DEFAULT_MAX_RETRIES;
