@@ -1056,6 +1056,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "reputation-contract"
+version = "0.0.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "request-contract"
 version = "0.0.0"
 dependencies = [
