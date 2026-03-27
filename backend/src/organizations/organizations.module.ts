@@ -7,6 +7,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { OrganizationEntity } from './entities/organization.entity';
 import { OrganizationsController } from './organizations.controller';
 import { OrganizationsService } from './organizations.service';
+import { OrganizationRepository } from './organizations.repository';
 
 @Module({
   imports: [
@@ -15,7 +16,7 @@ import { OrganizationsService } from './organizations.service';
     NotificationsModule,
   ],
   controllers: [OrganizationsController],
-  providers: [OrganizationsService],
-  exports: [OrganizationsService],
+  providers: [OrganizationsService, OrganizationRepository],
+  exports: [OrganizationsService, OrganizationRepository],
 })
 export class OrganizationsModule {}
