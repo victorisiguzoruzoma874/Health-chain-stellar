@@ -355,6 +355,17 @@ impl InventoryContract {
     pub fn get_status_change_count(env: Env, unit_id: u64) -> u64 {
         storage::get_blood_unit_status_change_count(&env, unit_id)
     }
+
+    /// Get all blood unit IDs for a given blood type.
+    ///
+    /// Returns an empty Vec if no units of that type exist.
+    pub fn get_units_by_blood_type(env: Env, blood_type: BloodType) -> Vec<u64> {
+        let key = DataKey::BloodTypeIndex(blood_type);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env))
+    }
 }
 
 #[cfg(test)]
