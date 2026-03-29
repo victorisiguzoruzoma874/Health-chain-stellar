@@ -35,10 +35,9 @@ import { UserActivityModule } from './user-activity/user-activity.module';
 import { UsersModule } from './users/users.module';
 import { TrackingModule } from './tracking/tracking.module';
 import { TransparencyModule } from './transparency/transparency.module';
+import { ProofBundleModule } from './proof-bundle/proof-bundle.module';
 import { PolicyCenterModule } from './policy-center/policy-center.module';
-import { RoleAwareThrottlerGuard } from './throttler/role-aware-throttler.guard';
-import { THROTTLE_TTL_MS } from './config/throttle-limits.config';
-import { throttleGetTracker } from './throttler/throttle-tracker.util';
+import { ReconciliationModule } from './reconciliation/reconciliation.module';
 
 import type Redis from 'ioredis';
 
@@ -107,7 +106,9 @@ import type Redis from 'ioredis';
     HospitalsModule,
     MapsModule,
     TransparencyModule,
+    ProofBundleModule,
     PolicyCenterModule,
+    ReconciliationModule,
   ],
   controllers: [AppController],
   providers: [
