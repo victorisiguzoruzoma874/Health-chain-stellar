@@ -5,11 +5,16 @@ import {
   CreateDateColumn,
   UpdateDateColumn,
   VersionColumn,
+  Index,
 } from 'typeorm';
 
 import { OrderStatus } from '../enums/order-status.enum';
 
 @Entity('orders')
+@Index('IDX_ORDERS_HOSPITAL_ID', ['hospitalId'])
+@Index('IDX_ORDERS_BLOOD_BANK_ID', ['bloodBankId'])
+@Index('IDX_ORDERS_STATUS', ['status'])
+@Index('IDX_ORDERS_CREATED_AT', ['createdAt'])
 export class OrderEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;
