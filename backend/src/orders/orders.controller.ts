@@ -23,6 +23,7 @@ import { OrderQueryParamsDto } from './dto/order-query-params.dto';
 import { UpdateRequestStatusDto } from './dto/update-request-status.dto';
 import { OrdersService } from './orders.service';
 import { Order } from './types/order.types';
+import { SlaService } from '../sla/sla.service';
 
 interface AuthenticatedRequest {
   user?: {
@@ -33,7 +34,7 @@ interface AuthenticatedRequest {
 
 @Controller('orders')
 export class OrdersController {
-  constructor(private readonly ordersService: OrdersService) {}
+  constructor(private readonly ordersService: OrdersService, private readonly slaService: SlaService) {}
 
   @RequirePermissions(Permission.VIEW_ORDER)
   @Get()
@@ -85,6 +86,12 @@ export class OrdersController {
    * Returns the full, chronologically-ordered event log for an order.
    * Each row contains: order_id, event_type, payload, actor_id, timestamp.
    */
+  @RequirePermissions(Permission.VIEW_ORDER)
+  @Get(':id/sla')
+  getOrderSla(@Param('id') id: string) {
+    return this.slaService.getOrderMetrics(id);
+  }
+
   @RequirePermissions(Permission.VIEW_ORDER)
   @Get(':id/history')
   getOrderHistory(@Param('id') id: string) {

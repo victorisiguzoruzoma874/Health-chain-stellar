@@ -11,6 +11,7 @@ import { UserEntity } from '../users/entities/user.entity';
 import { TwoFactorAuthEntity } from '../users/entities/two-factor-auth.entity';
 
 import { AuthController } from './auth.controller';
+import { PermissionsController } from './permissions.controller';
 import { AuthService } from './auth.service';
 import { EmailVerificationEntity } from './entities/email-verification.entity';
 import { AuthSessionEntity } from './entities/auth-session.entity';
@@ -56,7 +57,7 @@ import { AuthSessionRepository } from './repositories/auth-session.repository';
     IdempotencyModule,
     UserActivityModule,
   ],
-  controllers: [AuthController, MfaController],
+  controllers: [AuthController, PermissionsController],
   providers: [
     AuthService,
     MfaService,
