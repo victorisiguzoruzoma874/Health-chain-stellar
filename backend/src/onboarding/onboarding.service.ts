@@ -1,19 +1,36 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+
 import { Repository } from 'typeorm';
 
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
 import { OrganizationVerificationStatus } from '../organizations/enums/organization-verification-status.enum';
 import { OrganizationRepository } from '../organizations/organizations.repository';
+import { ReadinessEntityType } from '../readiness/enums/readiness.enum';
+import { ReadinessService } from '../readiness/readiness.service';
 import { SorobanService } from '../soroban/soroban.service';
-import { ActivateOnboardingDto, CreateOnboardingDto, ReviewOnboardingDto, SaveStepDto } from './dto/onboarding.dto';
+
+import {
+  ActivateOnboardingDto,
+  CreateOnboardingDto,
+  ReviewOnboardingDto,
+  SaveStepDto,
+} from './dto/onboarding.dto';
 import { PartnerOnboardingEntity } from './entities/partner-onboarding.entity';
 import { OnboardingStatus, OnboardingStep } from './enums/onboarding.enum';
 
 /** Required fields per step for compliance validation */
 const REQUIRED_FIELDS: Record<OnboardingStep, string[]> = {
   [OnboardingStep.PROFILE]: ['name', 'legalName', 'email', 'phone'],
-  [OnboardingStep.COMPLIANCE]: ['licenseNumber', 'registrationNumber', 'licenseDocumentUrl'],
+  [OnboardingStep.COMPLIANCE]: [
+    'licenseNumber',
+    'registrationNumber',
+    'licenseDocumentUrl',
+  ],
   [OnboardingStep.CONTACTS]: ['contactName', 'contactEmail'],
   [OnboardingStep.SERVICE_AREAS]: ['serviceAreas'],
   [OnboardingStep.WALLET]: ['walletAddress'],
@@ -26,9 +43,13 @@ export class OnboardingService {
     private readonly repo: Repository<PartnerOnboardingEntity>,
     private readonly orgRepo: OrganizationRepository,
     private readonly sorobanService: SorobanService,
+    private readonly readinessService: ReadinessService,
   ) {}
 
-  async create(userId: string, dto: CreateOnboardingDto): Promise<PartnerOnboardingEntity> {
+  async create(
+    userId: string,
+    dto: CreateOnboardingDto,
+  ): Promise<PartnerOnboardingEntity> {
     const draft = this.repo.create({
       submittedBy: userId,
       orgType: dto.orgType,
@@ -39,7 +60,11 @@ export class OnboardingService {
     return this.repo.save(draft);
   }
 
-  async saveStep(id: string, userId: string, dto: SaveStepDto): Promise<PartnerOnboardingEntity> {
+  async saveStep(
+    id: string,
+    userId: string,
+    dto: SaveStepDto,
+  ): Promise<PartnerOnboardingEntity> {
     const onboarding = await this.findOwned(id, userId);
     this.assertEditable(onboarding);
 
@@ -57,35 +82,64 @@ export class OnboardingService {
     return this.repo.save(onboarding);
   }
 
-  async review(id: string, reviewerId: string, dto: ReviewOnboardingDto): Promise<PartnerOnboardingEntity> {
+  async review(
+    id: string,
+    reviewerId: string,
+    dto: ReviewOnboardingDto,
+  ): Promise<PartnerOnboardingEntity> {
     const onboarding = await this.repo.findOne({ where: { id } });
     if (!onboarding) throw new NotFoundException('Onboarding not found');
     if (onboarding.status !== OnboardingStatus.SUBMITTED) {
-      throw new BadRequestException('Only submitted onboardings can be reviewed');
+      throw new BadRequestException(
+        'Only submitted onboardings can be reviewed',
+      );
     }
 
-    onboarding.status = dto.decision === 'approved' ? OnboardingStatus.APPROVED : OnboardingStatus.REJECTED;
+    onboarding.status =
+      dto.decision === 'approved'
+        ? OnboardingStatus.APPROVED
+        : OnboardingStatus.REJECTED;
     onboarding.reviewedBy = reviewerId;
     onboarding.reviewedAt = new Date();
     onboarding.rejectionReason = dto.rejectionReason ?? null;
     return this.repo.save(onboarding);
   }
 
-  async activate(id: string, reviewerId: string, dto: ActivateOnboardingDto): Promise<PartnerOnboardingEntity> {
+  async activate(
+    id: string,
+    reviewerId: string,
+    dto: ActivateOnboardingDto,
+  ): Promise<PartnerOnboardingEntity> {
     const onboarding = await this.repo.findOne({ where: { id } });
     if (!onboarding) throw new NotFoundException('Onboarding not found');
     if (onboarding.status !== OnboardingStatus.APPROVED) {
-      throw new BadRequestException('Only approved onboardings can be activated');
+      throw new BadRequestException(
+        'Only approved onboardings can be activated',
+      );
+    }
+
+    // Readiness gate: partner must have a signed-off readiness checklist
+    const ready = await this.readinessService.isReady(
+      ReadinessEntityType.PARTNER,
+      id,
+    );
+    if (!ready) {
+      throw new BadRequestException(
+        'Partner readiness checklist is not signed off. Complete all readiness items before activation.',
+      );
     }
 
     this.validateAllSteps(onboarding);
 
-    const profileData = (onboarding.data[OnboardingStep.PROFILE] ?? {}) as Record<string, string>;
+    const profileData = (onboarding.data[OnboardingStep.PROFILE] ??
+      {}) as Record<string, string>;
 
     // Register on-chain via identity contract (non-fatal)
     let contractTxHash: string | null = null;
     try {
-      const result = await this.sorobanService.verifyOrganization(dto.walletAddress);
+      const result = await this.sorobanService.verifyOrganization(
+        dto.walletAddress,
+      );
       contractTxHash = result.transactionHash;
     } catch {
       // on-chain registration can be retried separately
@@ -130,7 +184,10 @@ export class OnboardingService {
 
   // ── Private ──────────────────────────────────────────────────────────
 
-  private async findOwned(id: string, userId: string): Promise<PartnerOnboardingEntity> {
+  private async findOwned(
+    id: string,
+    userId: string,
+  ): Promise<PartnerOnboardingEntity> {
     const o = await this.repo.findOne({ where: { id, submittedBy: userId } });
     if (!o) throw new NotFoundException('Onboarding not found');
     return o;
@@ -151,7 +208,9 @@ export class OnboardingService {
       }
     }
     if (missing.length) {
-      throw new BadRequestException(`Missing required fields: ${missing.join(', ')}`);
+      throw new BadRequestException(
+        `Missing required fields: ${missing.join(', ')}`,
+      );
     }
   }
 }

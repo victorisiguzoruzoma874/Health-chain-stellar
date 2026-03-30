@@ -1,11 +1,20 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent, EventEmitter2 } from '@nestjs/event-emitter';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 
 import {
   OrderCancelledEvent,
   OrderStatusUpdatedEvent,
   OrderRiderAssignedEvent,
 } from '../events';
+import { BloodUnit } from '../blood-units/entities/blood-unit.entity';
+import { BloodStatus } from '../blood-units/enums/blood-status.enum';
+import { OrderEntity } from '../orders/entities/order.entity';
+import { OrderStatus } from '../orders/enums/order-status.enum';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationChannel } from '../notifications/enums/notification-channel.enum';
+import type { ColdChainBreachEvent } from '../cold-chain/cold-chain.service';
 
 import { RiderAssignmentService } from './rider-assignment.service';
 
@@ -17,6 +26,11 @@ export class DispatchService {
   constructor(
     private readonly eventEmitter: EventEmitter2,
     private readonly riderAssignmentService: RiderAssignmentService,
+    @InjectRepository(BloodUnit)
+    private readonly bloodUnitRepo: Repository<BloodUnit>,
+    @InjectRepository(OrderEntity)
+    private readonly orderRepo: Repository<OrderEntity>,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   /**
@@ -141,6 +155,66 @@ export class DispatchService {
       `Rider ${event.riderId} assigned to dispatch for order ${event.orderId}`,
     );
     return result;
+  }
+
+  @OnEvent('cold-chain.breach')
+  async handleColdChainBreach(event: ColdChainBreachEvent): Promise<void> {
+    this.logger.warn(
+      `Cold-chain breach detected for delivery ${event.deliveryId}: ` +
+        `${event.breachDurationMinutes.toFixed(1)} min outside 2–8 °C`,
+    );
+
+    // 1. Mark the order SUSPENDED
+    if (event.orderId) {
+      await this.orderRepo.update(event.orderId, {
+        status: OrderStatus.CANCELLED, // closest available status; extend enum if needed
+      });
+    }
+
+    // 2. Mark the blood unit COMPROMISED (map to QUARANTINED)
+    if (event.orderId) {
+      const order = await this.orderRepo.findOne({ where: { id: event.orderId } });
+      if (order) {
+        await this.bloodUnitRepo
+          .createQueryBuilder()
+          .update()
+          .set({ status: BloodStatus.QUARANTINED })
+          .where('reservedFor = :orderId', { orderId: event.orderId })
+          .execute();
+      }
+    }
+
+    // 3. Re-assign to a backup rider
+    try {
+      await this.riderAssignmentService.reassign(event.orderId ?? event.deliveryId);
+    } catch (err) {
+      this.logger.error(`Rider reassignment failed for delivery ${event.deliveryId}: ${(err as Error).message}`);
+    }
+
+    // 4. Notify hospital and blood bank
+    if (event.orderId) {
+      const order = await this.orderRepo.findOne({ where: { id: event.orderId } });
+      if (order) {
+        const notifyIds = [order.hospitalId, order.bloodBankId].filter(Boolean) as string[];
+        for (const recipientId of notifyIds) {
+          await this.notificationsService.send({
+            recipientId,
+            channels: [NotificationChannel.EMAIL],
+            templateKey: 'cold_chain_breach',
+            variables: {
+              deliveryId: event.deliveryId,
+              orderId: event.orderId ?? '',
+              breachDurationMinutes: String(event.breachDurationMinutes.toFixed(1)),
+              minTempCelsius: String(event.minTempCelsius),
+              maxTempCelsius: String(event.maxTempCelsius),
+              breachStartedAt: event.breachStartedAt.toISOString(),
+            },
+          }).catch((e) =>
+            this.logger.warn(`Breach notification failed for ${recipientId}: ${(e as Error).message}`),
+          );
+        }
+      }
+    }
   }
 
   async findAll(): Promise<{ message: string; data: unknown[] }> {

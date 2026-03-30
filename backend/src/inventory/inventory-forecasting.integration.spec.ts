@@ -50,6 +50,39 @@ class TestOrderEntity {
   updatedAt: Date;
 }
 
+@Entity('blood_requests')
+class TestBloodRequestEntity {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column({ name: 'delivery_address', nullable: true })
+  deliveryAddress: string | null;
+
+  @Column({ type: 'simple-json', nullable: true })
+  items: Array<{ bloodType: string; quantityMl: number }>;
+
+  @CreateDateColumn({ name: 'created_at' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'updated_at' })
+  updatedAt: Date;
+}
+
+@Entity('donations')
+class TestDonationEntity {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column({ type: 'simple-json', nullable: true })
+  metadata: Record<string, unknown> | null;
+
+  @CreateDateColumn({ name: 'created_at' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'updated_at' })
+  updatedAt: Date;
+}
+
 describe('InventoryForecasting Integration (SQLite)', () => {
   let service: InventoryForecastingService;
   let orderRepo: Repository<TestOrderEntity>;
@@ -87,7 +120,12 @@ describe('InventoryForecasting Integration (SQLite)', () => {
           entities: [TestOrderEntity, InventoryEntity],
           synchronize: true,
         }),
-        TypeOrmModule.forFeature([TestOrderEntity, InventoryEntity]),
+        TypeOrmModule.forFeature([
+          TestOrderEntity,
+          TestBloodRequestEntity,
+          TestDonationEntity,
+          InventoryEntity,
+        ]),
       ],
       providers: [
         InventoryForecastingService,
@@ -103,10 +141,17 @@ describe('InventoryForecasting Integration (SQLite)', () => {
           provide: getQueueToken('donor-outreach'),
           useValue: mockQueue,
         },
-        // HACK: Use TestOrderEntity repository for OrderEntity token
         {
           provide: getRepositoryToken(OrderEntity),
           useExisting: getRepositoryToken(TestOrderEntity),
+        },
+        {
+          provide: getRepositoryToken(BloodRequestEntity),
+          useExisting: getRepositoryToken(TestBloodRequestEntity),
+        },
+        {
+          provide: getRepositoryToken(DonationEntity),
+          useExisting: getRepositoryToken(TestDonationEntity),
         },
       ],
     }).compile();

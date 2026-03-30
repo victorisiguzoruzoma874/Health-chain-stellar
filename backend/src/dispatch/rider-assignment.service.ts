@@ -55,8 +55,48 @@ export class RiderAssignmentService {
     };
   }
 
-  async getAssignmentLogs(orderId?: string) {
-    const data = orderId
+  /**
+   * Reassign a delivery/order to a new backup rider after a cold-chain breach.
+   */
+  async reassign(orderId: string): Promise<void> {
+    this.logger.log(`Reassigning rider for order/delivery ${orderId} after cold-chain breach`);
+    const availableResponse = await this.ridersService.getAvailableRiders();
+    const riders = availableResponse.data ?? [];
+
+    if (riders.length === 0) {
+      this.logger.warn(`No available riders for reassignment of ${orderId}`);
+      this.appendAssignmentLog({
+        orderId,
+        selectedRiderId: null,
+        status: 'exhausted',
+        attemptNumber: 0,
+        candidates: [],
+        weights: this.defaultWeights,
+        reason: 'no_available_riders',
+      });
+      return;
+    }
+
+    const policyConfig = await this.getRuntimeAssignmentConfig();
+    const scored = await this.scoreRiders(riders, orderId, policyConfig.weights);
+    const ranked = scored.sort((a, b) => b.score.totalScore - a.score.totalScore);
+    const best = ranked[0];
+
+    this.appendAssignmentLog({
+      orderId,
+      selectedRiderId: best.rider.id,
+      status: 'pending',
+      attemptNumber: 1,
+      candidates: ranked.map((r) => r.score),
+      weights: policyConfig.weights,
+      reason: 'initial_assignment',
+    });
+
+    this.eventEmitter.emit('order.rider.assigned', new OrderRiderAssignedEvent(orderId, best.rider.id));
+    this.logger.log(`Backup rider ${best.rider.id} assigned to ${orderId}`);
+  }
+
+  async getAssignmentLogs(orderId?: string) {    const data = orderId
       ? this.assignmentLogs.filter((log) => log.orderId === orderId)
       : this.assignmentLogs;
 

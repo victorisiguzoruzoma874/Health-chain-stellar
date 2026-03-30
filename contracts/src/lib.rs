@@ -59,6 +59,8 @@ pub enum Error {
     AlreadyVerified = 27,
     /// Caller is an authorized actor but is not the current custodian of the unit.
     NotCurrentCustodian = 29,
+    InvalidMultiSigConfig = 30,
+    DuplicateApproval = 31,
 }
 
 // Alias for issue/docs terminology.
@@ -364,6 +366,17 @@ pub struct DisputeResolvedEvent {
     pub resolved_at: u64,
 }
 
+/// Event emitted when an expired dispute is auto-refunded.
+#[contracttype]
+#[derive(Clone)]
+pub struct DisputeAutoRefundedEvent {
+    pub case_id: u64,
+    pub payment_id: u64,
+    pub refunded_to: Address,
+    pub amount: i128,
+    pub refunded_at: u64,
+}
+
 /// Storage key literals (compile-time guarded for `symbol_short!` compatibility).
 const BLOOD_UNITS_KEY: &str = "UNITS";
 const NEXT_ID_KEY: &str = "NEXT_ID";
@@ -380,6 +393,11 @@ const DISPUTES_KEY: &str = "DISP_REC";
 const NEXT_DISPUTE_ID_KEY: &str = "NDIS_ID";
 const CUSTODY_EVENTS_KEY: &str = "CUSTODY";
 const HISTORY_KEY: &str = "HISTORY";
+const DISPUTE_METADATA_KEY: &str = "DISP_META";
+const DISPUTE_TIMEOUT_KEY: &str = "DSP_TO";
+const PAYMENT_STATS_KEY: &str = "PAY_STATS";
+const MULTISIG_CONFIG_KEY: &str = "MSIG_CFG";
+const PENDING_APPROVALS_KEY: &str = "PEND_APR";
 
 const _: () = assert!(BLOOD_UNITS_KEY.len() <= 9);
 const _: () = assert!(NEXT_ID_KEY.len() <= 9);
@@ -396,6 +414,11 @@ const _: () = assert!(DISPUTES_KEY.len() <= 9);
 const _: () = assert!(NEXT_DISPUTE_ID_KEY.len() <= 9);
 const _: () = assert!(CUSTODY_EVENTS_KEY.len() <= 9);
 const _: () = assert!(HISTORY_KEY.len() <= 9);
+const _: () = assert!(DISPUTE_METADATA_KEY.len() <= 9);
+const _: () = assert!(DISPUTE_TIMEOUT_KEY.len() <= 9);
+const _: () = assert!(PAYMENT_STATS_KEY.len() <= 9);
+const _: () = assert!(MULTISIG_CONFIG_KEY.len() <= 9);
+const _: () = assert!(PENDING_APPROVALS_KEY.len() <= 9);
 
 /// Storage keys (single source of truth)
 pub(crate) const BLOOD_UNITS: Symbol = symbol_short!("UNITS");
@@ -413,6 +436,11 @@ pub(crate) const DISPUTES: Symbol = symbol_short!("DISP_REC");
 pub(crate) const NEXT_DISPUTE_ID: Symbol = symbol_short!("NDIS_ID");
 pub(crate) const CUSTODY_EVENTS: Symbol = symbol_short!("CUSTODY");
 pub(crate) const HISTORY: Symbol = symbol_short!("HISTORY");
+pub(crate) const DISPUTE_METADATA: Symbol = symbol_short!("DISP_META");
+pub(crate) const DISPUTE_TIMEOUT: Symbol = symbol_short!("DSP_TO");
+pub(crate) const PAYMENT_STATS: Symbol = symbol_short!("PAY_STATS");
+pub(crate) const MULTISIG_CONFIG: Symbol = symbol_short!("MSIG_CFG");
+pub(crate) const PENDING_APPROVALS: Symbol = symbol_short!("PEND_APR");
 /// Storage key enumeration for composite keys
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1905,6 +1933,130 @@ impl HealthChainContract {
         Ok(payment_id)
     }
 
+    /// Configure the dispute timeout window in seconds (admin only).
+    pub fn set_dispute_timeout(env: Env, timeout_secs: u64) -> Result<(), Error> {
+    /// Configure M-of-N multisig signers for high-value escrow releases.
+    pub fn configure_multisig(
+        env: Env,
+        signers: Vec<Address>,
+        threshold: u32,
+    ) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(Error::Unauthorized)?;
+        admin.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DISPUTE_TIMEOUT, &timeout_secs);
+        Ok(())
+    }
+
+    /// Read the active dispute timeout, falling back to the default 72h window.
+    pub fn get_dispute_timeout(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DISPUTE_TIMEOUT)
+            .unwrap_or(DEFAULT_DISPUTE_TIMEOUT_SECS)
+    }
+
+    /// Read aggregate payment stats for auto-refunded disputes.
+    pub fn get_payment_stats(env: Env) -> PaymentStats {
+        env.storage()
+            .persistent()
+            .get(&PAYMENT_STATS)
+            .unwrap_or(PaymentStats::new())
+        let config = MultiSigConfig { signers, threshold };
+        config
+            .validate()
+            .map_err(|_| Error::InvalidMultiSigConfig)?;
+
+        env.storage().persistent().set(&MULTISIG_CONFIG, &config);
+        Ok(())
+    }
+
+    /// Propose an escrow release. Low-value payments keep single-admin flow.
+    /// High-value payments require threshold approvals from configured signers.
+    pub fn propose_release(env: Env, payment_id: u64, approver: Address) -> Result<bool, Error> {
+        approver.require_auth();
+
+        let mut payments: Map<u64, Payment> = env
+            .storage()
+            .persistent()
+            .get(&PAYMENTS)
+            .ok_or(Error::PaymentNotFound)?;
+
+        let mut payment = payments.get(payment_id).ok_or(Error::PaymentNotFound)?;
+        if !payment.can_transition_to(PaymentStatus::Completed) {
+            return Err(Error::InvalidPaymentStatus);
+        }
+
+        let mut pending_approvals: Map<u64, PendingApproval> = env
+            .storage()
+            .persistent()
+            .get(&PENDING_APPROVALS)
+            .unwrap_or(Map::new(&env));
+
+        if payment.amount < HIGH_VALUE_THRESHOLD {
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&ADMIN)
+                .ok_or(Error::Unauthorized)?;
+            if approver != admin {
+                return Err(Error::Unauthorized);
+            }
+
+            payment.status = PaymentStatus::Completed;
+            payment.escrow_released_at = Some(env.ledger().timestamp());
+            payments.set(payment_id, payment);
+            env.storage().persistent().set(&PAYMENTS, &payments);
+            pending_approvals.remove(payment_id);
+            env.storage()
+                .persistent()
+                .set(&PENDING_APPROVALS, &pending_approvals);
+            return Ok(true);
+        }
+
+        let config: MultiSigConfig = env
+            .storage()
+            .persistent()
+            .get(&MULTISIG_CONFIG)
+            .ok_or(Error::InvalidMultiSigConfig)?;
+        config
+            .validate()
+            .map_err(|_| Error::InvalidMultiSigConfig)?;
+
+        if !config.is_signer(&approver) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut approval = pending_approvals
+            .get(payment_id)
+            .unwrap_or(PendingApproval::new(&env, payment_id));
+
+        approval
+            .register_vote(approver)
+            .map_err(|_| Error::DuplicateApproval)?;
+
+        if approval.has_reached_threshold(config.threshold) {
+            approval.executed = true;
+            payment.status = PaymentStatus::Completed;
+            payment.escrow_released_at = Some(env.ledger().timestamp());
+            payments.set(payment_id, payment);
+            env.storage().persistent().set(&PAYMENTS, &payments);
+        }
+
+        pending_approvals.set(payment_id, approval.clone());
+        env.storage()
+            .persistent()
+            .set(&PENDING_APPROVALS, &pending_approvals);
+
+        Ok(approval.executed)
+    }
+
     /// Raise a dispute for a payment
     pub fn raise_dispute(
         env: Env,
@@ -1945,6 +2097,11 @@ impl HealthChainContract {
             raised_at: env.ledger().timestamp(),
             resolved_at: None,
         };
+        let dispute_deadline = env.ledger().timestamp() + Self::get_dispute_timeout(env.clone());
+        let metadata = DisputeMetadata {
+            dispute_id,
+            dispute_deadline,
+        };
 
         payment.status = PaymentStatus::Disputed;
         payments.set(payment_id, payment.clone());
@@ -1958,6 +2115,15 @@ impl HealthChainContract {
 
         disputes.set(dispute_id, dispute);
         env.storage().persistent().set(&DISPUTES, &disputes);
+        let mut dispute_metadata: Map<u64, DisputeMetadata> = env
+            .storage()
+            .persistent()
+            .get(&DISPUTE_METADATA)
+            .unwrap_or(Map::new(&env));
+        dispute_metadata.set(dispute_id, metadata);
+        env.storage()
+            .persistent()
+            .set(&DISPUTE_METADATA, &dispute_metadata);
         env.storage()
             .instance()
             .set(&NEXT_DISPUTE_ID, &(dispute_id + 1));
@@ -2072,6 +2238,82 @@ impl HealthChainContract {
         );
 
         Ok(())
+    }
+
+    /// Permissionless cleanup for disputes that exceeded their arbitration deadline.
+    pub fn process_expired_disputes(env: Env) -> Result<u32, Error> {
+        let current_time = env.ledger().timestamp();
+        let mut disputes: Map<u64, Dispute> = env
+            .storage()
+            .persistent()
+            .get(&DISPUTES)
+            .unwrap_or(Map::new(&env));
+        let dispute_metadata: Map<u64, DisputeMetadata> = env
+            .storage()
+            .persistent()
+            .get(&DISPUTE_METADATA)
+            .unwrap_or(Map::new(&env));
+        let mut payments: Map<u64, Payment> = env
+            .storage()
+            .persistent()
+            .get(&PAYMENTS)
+            .unwrap_or(Map::new(&env));
+        let mut stats = Self::get_payment_stats(env.clone());
+        let mut processed = 0u32;
+
+        for dispute_id in disputes.keys() {
+            let mut dispute = disputes.get(dispute_id).unwrap();
+            if dispute.status != DisputeStatus::Open {
+                continue;
+            }
+
+            let metadata = match dispute_metadata.get(dispute_id) {
+                Some(metadata) => metadata,
+                None => continue,
+            };
+
+            if current_time <= metadata.dispute_deadline {
+                continue;
+            }
+
+            let mut payment = match payments.get(dispute.payment_id) {
+                Some(payment) => payment,
+                None => continue,
+            };
+
+            if payment.status != PaymentStatus::Disputed {
+                continue;
+            }
+
+            payment.status = PaymentStatus::Refunded;
+            payment.escrow_released_at = Some(current_time);
+            payments.set(dispute.payment_id, payment.clone());
+
+            dispute.status = DisputeStatus::ResolvedInFavorOfPayer;
+            dispute.resolved_at = Some(current_time);
+            disputes.set(dispute_id, dispute.clone());
+
+            stats.count_auto_refunded += 1;
+            stats.total_auto_refunded += payment.amount;
+            processed += 1;
+
+            env.events().publish(
+                (symbol_short!("dispute"), symbol_short!("auto_ref")),
+                DisputeAutoRefundedEvent {
+                    case_id: dispute_id,
+                    payment_id: payment.id,
+                    refunded_to: payment.payer,
+                    amount: payment.amount,
+                    refunded_at: current_time,
+                },
+            );
+        }
+
+        env.storage().persistent().set(&DISPUTES, &disputes);
+        env.storage().persistent().set(&PAYMENTS, &payments);
+        env.storage().persistent().set(&PAYMENT_STATS, &stats);
+
+        Ok(processed)
     }
 
     /// Update request status
