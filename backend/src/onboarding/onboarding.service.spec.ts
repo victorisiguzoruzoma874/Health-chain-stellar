@@ -4,6 +4,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 
 import { OrganizationRepository } from '../../organizations/organizations.repository';
 import { OrganizationType } from '../../organizations/enums/organization-type.enum';
+import { ReadinessService } from '../../readiness/readiness.service';
 import { SorobanService } from '../../soroban/soroban.service';
 import { ActivateOnboardingDto } from '../dto/onboarding.dto';
 import { PartnerOnboardingEntity } from '../entities/partner-onboarding.entity';
@@ -34,6 +35,10 @@ const mockSoroban = () => ({
   verifyOrganization: jest.fn(async () => ({ transactionHash: 'tx-1' })),
 });
 
+const mockReadiness = () => ({
+  isReady: jest.fn(async () => true),
+});
+
 describe('OnboardingService', () => {
   let service: OnboardingService;
   let repo: ReturnType<typeof mockRepo>;
@@ -48,6 +53,7 @@ describe('OnboardingService', () => {
         { provide: getRepositoryToken(PartnerOnboardingEntity), useValue: repo },
         { provide: OrganizationRepository, useValue: orgRepo },
         { provide: SorobanService, useValue: mockSoroban() },
+        { provide: ReadinessService, useValue: mockReadiness() },
       ],
     }).compile();
     service = module.get(OnboardingService);
@@ -116,6 +122,22 @@ describe('OnboardingService', () => {
       .rejects.toThrow(BadRequestException);
   });
 
+  it('activate throws if readiness checklist is not signed off', async () => {
+    repo.findOne.mockResolvedValue({ id: 'ob-1', status: OnboardingStatus.APPROVED, orgType: OrganizationType.HOSPITAL, data: FULL_DATA });
+    const notReadyMod = await Test.createTestingModule({
+      providers: [
+        OnboardingService,
+        { provide: getRepositoryToken(PartnerOnboardingEntity), useValue: repo },
+        { provide: OrganizationRepository, useValue: orgRepo },
+        { provide: SorobanService, useValue: mockSoroban() },
+        { provide: ReadinessService, useValue: { isReady: jest.fn(async () => false) } },
+      ],
+    }).compile();
+    const svc = notReadyMod.get(OnboardingService);
+    await expect(svc.activate('ob-1', 'admin-1', { walletAddress: 'G', licenseNumber: 'L' }))
+      .rejects.toThrow(BadRequestException);
+  });
+
   it('activate proceeds even if on-chain call fails', async () => {
     const soroban = { verifyOrganization: jest.fn(async () => { throw new Error('rpc'); }) };
     const mod = await Test.createTestingModule({
@@ -124,6 +146,7 @@ describe('OnboardingService', () => {
         { provide: getRepositoryToken(PartnerOnboardingEntity), useValue: repo },
         { provide: OrganizationRepository, useValue: orgRepo },
         { provide: SorobanService, useValue: soroban },
+        { provide: ReadinessService, useValue: mockReadiness() },
       ],
     }).compile();
     const svc = mod.get(OnboardingService);
