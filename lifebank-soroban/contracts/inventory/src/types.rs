@@ -272,8 +272,11 @@ pub enum DataKey {
     /// Admin address
     Admin,
 
-    /// Status change history for a blood unit
-    StatusHistory(u64), // u64 is blood_unit_id -> Vec<StatusChangeHistory>
+    /// Status change history for a blood unit — stores current page number
+    StatusHistory(u64),
+
+    /// One page of status change history: (blood_unit_id, page_number)
+    StatusHistoryPage(u64, u32),
 
     /// Counter for status change history records
     StatusHistoryCounter,
