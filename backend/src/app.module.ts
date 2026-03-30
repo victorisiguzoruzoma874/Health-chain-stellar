@@ -1,46 +1,46 @@
+import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { EventEmitterModule } from '@nestjs/event-emitter';
-import { BullModule } from '@nestjs/bullmq';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ThrottlerModule } from '@nestjs/throttler';
+import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 
+import { AnomalyModule } from './anomaly/anomaly.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { AnomalyModule } from './anomaly/anomaly.module';
-import { BatchImportModule } from './batch-import/batch-import.module';
-import { WorkflowModule } from './workflow/workflow.module';
 import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from './auth/guards/permissions.guard';
+import { BatchImportModule } from './batch-import/batch-import.module';
 import { BlockchainModule } from './blockchain/blockchain.module';
 import { BloodRequestsModule } from './blood-requests/blood-requests.module';
 import { BloodUnitsModule } from './blood-units/blood-units.module';
 import { AuditLogModule } from './common/audit/audit-log.module';
-import { EventsModule } from './events/events.module';
 import { CorrelationIdMiddleware } from './common/middleware/correlation-id.middleware';
 import { CorrelationIdService } from './common/middleware/correlation-id.service';
 import { AppConfigModule } from './config/config.module';
 import { DatabaseSyncGuard } from './config/database-sync.guard';
 import { DispatchModule } from './dispatch/dispatch.module';
-import { EscalationModule } from './escalation/escalation.module';
 import { DonorImpactModule } from './donor-impact/donor-impact.module';
-import { LocationHistoryModule } from './location-history/location-history.module';
+import { EscalationModule } from './escalation/escalation.module';
+import { EventsModule } from './events/events.module';
 import { HospitalsModule } from './hospitals/hospitals.module';
 import { InventoryModule } from './inventory/inventory.module';
+import { LocationHistoryModule } from './location-history/location-history.module';
 import { MapsModule } from './maps/maps.module';
 import { NotificationsModule } from './notifications/notifications.module';
-import { UserActivityModule } from './user-activity/user-activity.module';
-import { UsersModule } from './users/users.module';
+import { PolicyCenterModule } from './policy-center/policy-center.module';
+import { ProofBundleModule } from './proof-bundle/proof-bundle.module';
+import { ReconciliationModule } from './reconciliation/reconciliation.module';
+import { RouteDeviationModule } from './route-deviation/route-deviation.module';
 import { TrackingModule } from './tracking/tracking.module';
 import { TransparencyModule } from './transparency/transparency.module';
-import { ProofBundleModule } from './proof-bundle/proof-bundle.module';
-import { PolicyCenterModule } from './policy-center/policy-center.module';
-import { ReconciliationModule } from './reconciliation/reconciliation.module';
-import { HealthModule } from './health/health.module';
+import { UserActivityModule } from './user-activity/user-activity.module';
+import { UsersModule } from './users/users.module';
+import { WorkflowModule } from './workflow/workflow.module';
 
 import type Redis from 'ioredis';
 
@@ -120,7 +120,7 @@ import type Redis from 'ioredis';
     ProofBundleModule,
     PolicyCenterModule,
     ReconciliationModule,
-    HealthModule,
+    RouteDeviationModule,
   ],
   controllers: [AppController],
   providers: [
