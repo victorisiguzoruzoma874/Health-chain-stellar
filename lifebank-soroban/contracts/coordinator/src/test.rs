@@ -163,6 +163,18 @@ impl MockPaymentContract {
             .persistent()
             .set(&PayKey::Payment(payment_id), &p);
     }
+
+    pub fn record_dispute(env: Env, payment_id: u64, _reason: super::payment_client::DisputeReason, _case_id: String) {
+        let mut p: Payment = env
+            .storage()
+            .persistent()
+            .get(&PayKey::Payment(payment_id))
+            .unwrap();
+        p.status = PaymentStatus::Disputed;
+        env.storage()
+            .persistent()
+            .set(&PayKey::Payment(payment_id), &p);
+    }
 }
 
 // ── Harness ───────────────────────────────────────────────────────────────────
@@ -435,4 +447,87 @@ fn test_coordinator_non_admin_cannot_pause() {
     let h = setup();
     let attacker = Address::generate(&h.env);
     h.coord.pause(&attacker);
+}
+
+// ── Temperature excursion → dispute integration tests (issue #477) ────────────
+
+use super::ExcursionSummary;
+
+fn make_excursion(unit_id: u64) -> ExcursionSummary {
+    ExcursionSummary {
+        unit_id,
+        violation_count: 3,
+        peak_celsius_x100: 1200, // 12.00°C — above threshold
+        detected_at: 1000,
+    }
+}
+
+/// Full chain: flag_temperature_breach transitions Locked → Disputed.
+#[test]
+fn test_flag_temperature_breach_transitions_locked_to_disputed() {
+    let h = setup();
+    let payment_id = create_locked_payment(&h, 99);
+
+    let excursion = make_excursion(42);
+    h.coord
+        .flag_temperature_breach(&h.admin, &payment_id, &excursion);
+
+    let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
+    assert_eq!(
+        payment.status,
+        PaymentStatus::Disputed,
+        "Payment must be Disputed after temperature breach"
+    );
+}
+
+/// flag_temperature_breach on a non-Locked payment returns InvalidPaymentState.
+#[test]
+fn test_flag_temperature_breach_non_locked_payment_fails() {
+    let h = setup();
+    // Create a Released payment
+    let payment_id = MockPaymentContractClient::new(&h.env, &h.pay_id)
+        .create_payment(&1u64, &PaymentStatus::Released);
+
+    let excursion = make_excursion(1);
+    let result = h
+        .coord
+        .try_flag_temperature_breach(&h.admin, &payment_id, &excursion);
+    assert_eq!(
+        result,
+        Err(Ok(CoordinatorError::InvalidPaymentState)),
+        "Non-Locked payment must return InvalidPaymentState"
+    );
+}
+
+/// flag_temperature_breach on a missing payment returns PaymentNotFound.
+#[test]
+fn test_flag_temperature_breach_missing_payment_fails() {
+    let h = setup();
+    let excursion = make_excursion(1);
+    let result = h
+        .coord
+        .try_flag_temperature_breach(&h.admin, &9999u64, &excursion);
+    assert_eq!(
+        result,
+        Err(Ok(CoordinatorError::PaymentNotFound)),
+        "Missing payment must return PaymentNotFound"
+    );
+}
+
+/// Paused coordinator rejects flag_temperature_breach.
+#[test]
+fn test_flag_temperature_breach_blocked_when_paused() {
+    let h = setup();
+    let payment_id = create_locked_payment(&h, 1);
+    h.coord.pause(&h.admin);
+
+    let excursion = make_excursion(1);
+    let result = h
+        .coord
+        .try_flag_temperature_breach(&h.admin, &payment_id, &excursion);
+    assert_eq!(result, Err(Ok(CoordinatorError::ContractPaused)));
+
+    // Payment must remain Locked
+    let payment = MockPaymentContractClient::new(&h.env, &h.pay_id).get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Locked);
 }

@@ -17,9 +17,9 @@ mod types;
 mod test;
 
 pub use error::CoordinatorError;
-pub use types::{DataKey, WorkflowRecord, WorkflowStatus};
+pub use types::{DataKey, ExcursionSummary, WorkflowRecord, WorkflowStatus};
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec};
 
 // ── Minimal interface types mirroring the domain contracts ────────────────────
 // These allow the coordinator to inspect cross-contract return values without
@@ -116,13 +116,26 @@ mod inventory_client {
 }
 
 mod payment_client {
-    use soroban_sdk::{contractclient, Env};
+    use soroban_sdk::{contractclient, Env, String};
     use super::{Payment, PaymentStatus};
+
+    #[contracttype]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum DisputeReason {
+        FailedDelivery,
+        TemperatureExcursion,
+        PaymentContested,
+        WrongItem,
+        DamagedGoods,
+        LateDelivery,
+        Other,
+    }
 
     #[contractclient(name = "PaymentContractClient")]
     pub trait PaymentContractInterface {
         fn get_payment(env: Env, payment_id: u64) -> Payment;
         fn update_status(env: Env, payment_id: u64, status: PaymentStatus);
+        fn record_dispute(env: Env, payment_id: u64, reason: DisputeReason, case_id: String);
     }
 }
 
@@ -466,6 +479,60 @@ impl CoordinatorContract {
 
     pub fn get_workflow(env: Env, request_id: u64) -> Result<WorkflowRecord, CoordinatorError> {
         load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)
+    }
+
+    /// Flag a temperature breach: transitions the linked payment from Locked → Disputed.
+    ///
+    /// Called by the temperature contract when a sustained excursion is detected.
+    ///
+    /// # Errors
+    /// - `PaymentNotFound`     - No payment with this ID
+    /// - `InvalidPaymentState` - Payment is not in Locked status
+    /// - `PaymentFlagFailed`   - Cross-contract call to payments failed
+    pub fn flag_temperature_breach(
+        env: Env,
+        caller: Address,
+        payment_id: u64,
+        excursion_summary: ExcursionSummary,
+    ) -> Result<(), CoordinatorError> {
+        caller.require_auth();
+        Self::require_initialized(&env)?;
+        Self::require_not_paused(&env)?;
+
+        let pay_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentContract)
+            .unwrap();
+        let pay_client = PaymentContractClient::new(&env, &pay_addr);
+
+        let payment = pay_client
+            .try_get_payment(&payment_id)
+            .map_err(|_| CoordinatorError::PaymentNotFound)?
+            .map_err(|_| CoordinatorError::PaymentNotFound)?;
+
+        if payment.status != PaymentStatus::Locked {
+            return Err(CoordinatorError::InvalidPaymentState);
+        }
+
+        let case_id = String::from_str(&env, "TEMP-EXCURSION");
+
+        pay_client
+            .try_record_dispute(
+                &payment_id,
+                &payment_client::DisputeReason::TemperatureExcursion,
+                &case_id,
+            )
+            .map_err(|_| CoordinatorError::PaymentFlagFailed)?
+            .map_err(|_| CoordinatorError::PaymentFlagFailed)?;
+
+        let now = env.ledger().timestamp();
+        env.events().publish(
+            (symbol_short!("coord"), symbol_short!("tmp_brch")),
+            (payment_id, excursion_summary.unit_id, now),
+        );
+
+        Ok(())
     }
 
     pub fn is_initialized(env: Env) -> bool {

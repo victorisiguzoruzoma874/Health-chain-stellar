@@ -10,4 +10,8 @@ pub enum ContractError {
     InvalidThreshold = 603,
     AlreadyInitialized = 604,
     ContractPaused = 605,
+    /// Coordinator contract address not configured
+    CoordinatorNotSet = 606,
+    /// Cross-contract call to coordinator failed
+    CoordinatorCallFailed = 607,
 }

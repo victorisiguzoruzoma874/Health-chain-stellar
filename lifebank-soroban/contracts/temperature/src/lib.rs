@@ -5,13 +5,24 @@ mod storage;
 mod types;
 
 use crate::error::ContractError;
-use crate::types::{DataKey, TemperatureReading, TemperatureSummary, TemperatureThreshold};
-use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
+use crate::types::{DataKey, ExcursionSummary, TemperatureReading, TemperatureSummary, TemperatureThreshold};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Env, Vec};
 
 const PAGE_SIZE: u32 = 20;
 
 #[contract]
 pub struct TemperatureContract;
+
+/// Minimal coordinator interface for cross-contract excursion reporting.
+#[contractclient(name = "CoordinatorContractClient")]
+pub trait CoordinatorContractInterface {
+    fn flag_temperature_breach(
+        env: soroban_sdk::Env,
+        caller: Address,
+        payment_id: u64,
+        excursion_summary: ExcursionSummary,
+    ) -> Result<(), soroban_sdk::Error>;
+}
 
 #[contractimpl]
 impl TemperatureContract {
@@ -341,6 +352,100 @@ impl TemperatureContract {
 
         env.storage().persistent().set(&streak_key, &0u32);
         env.storage().persistent().set(&compromised_key, &false);
+
+        Ok(())
+    }
+
+    // ── Coordinator integration ────────────────────────────────────────────────
+
+    /// Configure the coordinator contract address. Admin only.
+    pub fn set_coordinator(
+        env: Env,
+        admin: Address,
+        coordinator: Address,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin = storage::get_admin(&env);
+        if admin != stored_admin {
+            return Err(ContractError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::CoordinatorContract, &coordinator);
+        Ok(())
+    }
+
+    /// Whitelist an IoT oracle address that may call report_excursion_to_coordinator.
+    pub fn add_oracle(
+        env: Env,
+        admin: Address,
+        oracle: Address,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin = storage::get_admin(&env);
+        if admin != stored_admin {
+            return Err(ContractError::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::OracleWhitelist(oracle), &true);
+        Ok(())
+    }
+
+    /// Report a sustained temperature excursion to the coordinator contract,
+    /// which will transition the linked payment from Locked → Disputed.
+    ///
+    /// Only the admin or a whitelisted IoT oracle may call this function.
+    ///
+    /// # Arguments
+    /// * `caller`            - Admin or whitelisted oracle address
+    /// * `unit_id`           - Blood unit that experienced the excursion
+    /// * `payment_id`        - Payment ID to flag in the coordinator
+    /// * `excursion_summary` - Structured summary of the excursion
+    ///
+    /// # Errors
+    /// - `Unauthorized`          - Caller is not admin or whitelisted oracle
+    /// - `CoordinatorNotSet`     - Coordinator address not configured
+    /// - `CoordinatorCallFailed` - Cross-contract call to coordinator failed
+    pub fn report_excursion_to_coordinator(
+        env: Env,
+        caller: Address,
+        unit_id: u64,
+        payment_id: u64,
+        excursion_summary: ExcursionSummary,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::require_not_paused(&env)?;
+
+        // Gate: caller must be admin or whitelisted oracle
+        let stored_admin = storage::get_admin(&env);
+        let is_admin = caller == stored_admin;
+        let is_oracle: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OracleWhitelist(caller.clone()))
+            .unwrap_or(false);
+
+        if !is_admin && !is_oracle {
+            return Err(ContractError::Unauthorized);
+        }
+
+        let coordinator_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::CoordinatorContract)
+            .ok_or(ContractError::CoordinatorNotSet)?;
+
+        let coord_client = CoordinatorContractClient::new(&env, &coordinator_addr);
+        coord_client
+            .try_flag_temperature_breach(&caller, &payment_id, &excursion_summary)
+            .map_err(|_| ContractError::CoordinatorCallFailed)?
+            .map_err(|_| ContractError::CoordinatorCallFailed)?;
+
+        env.events().publish(
+            (soroban_sdk::symbol_short!("tmp_excur"),),
+            (unit_id, payment_id, excursion_summary.violation_count),
+        );
 
         Ok(())
     }
