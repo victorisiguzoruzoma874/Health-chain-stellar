@@ -347,6 +347,23 @@ pub struct StatusChangeEvent {
     pub reason: Option<String>,
 }
 
+/// On-chain audit event for every blood unit status transition.
+/// Emitted as `blood_unit_status_changed` — immutable once published.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AuditEvent {
+    /// Blood unit that transitioned
+    pub unit_id: u64,
+    /// Status before the transition
+    pub previous_status: BloodStatus,
+    /// Status after the transition
+    pub new_status: BloodStatus,
+    /// Address that authorised the transition
+    pub actor: Address,
+    /// Ledger timestamp of the transition
+    pub timestamp: u64,
+}
+
 /// Historical record of a status change
 #[contracttype]
 #[derive(Clone, Debug)]

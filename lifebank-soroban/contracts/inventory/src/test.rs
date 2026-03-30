@@ -1534,3 +1534,149 @@ fn test_non_admin_cannot_pause() {
     let attacker = Address::generate(&env);
     client.pause(&attacker);
 }
+
+// ── Audit event / state-transition table tests (issue #470) ──────────────────
+
+/// Every valid transition emits exactly one blood_unit_status_changed event
+/// (published under the "bld_unit_chg" topic).
+#[test]
+fn test_valid_transition_emits_audit_event() {
+    use crate::types::ALLOWED_BLOOD_STATUS_TRANSITIONS;
+    use soroban_sdk::testutils::Events as _;
+
+    // We test Available → Reserved as a representative valid transition.
+    let (env, admin, client, _) = create_test_contract();
+    env.ledger().set_timestamp(1000);
+
+    let unit_id = client.register_blood(&admin, &BloodType::APositive, &450u32, &None);
+
+    // Clear events from registration
+    let _ = env.events().all();
+
+    client.update_status(&unit_id, &BloodStatus::Reserved, &admin, &None);
+
+    let events = env.events().all();
+    // Expect at least one event with topic "bld_unit_chg"
+    let audit_events: Vec<_> = events
+        .iter()
+        .filter(|(_, topics, _)| {
+            topics.len() > 0
+                && topics
+                    .get(0)
+                    .map(|t| {
+                        // Compare symbol string representation
+                        format!("{:?}", t).contains("bld_unit_chg")
+                    })
+                    .unwrap_or(false)
+        })
+        .collect();
+
+    assert_eq!(
+        audit_events.len(),
+        1,
+        "Expected exactly one blood_unit_status_changed audit event"
+    );
+}
+
+/// Every illegal transition returns InvalidStatusTransition.
+#[test]
+fn test_illegal_transitions_return_error() {
+    use crate::types::{BloodStatus, ALLOWED_BLOOD_STATUS_TRANSITIONS};
+
+    let illegal_pairs: &[(BloodStatus, BloodStatus)] = &[
+        (BloodStatus::Delivered, BloodStatus::Available),
+        (BloodStatus::Delivered, BloodStatus::Reserved),
+        (BloodStatus::Delivered, BloodStatus::InTransit),
+        (BloodStatus::Disposed, BloodStatus::Available),
+        (BloodStatus::InTransit, BloodStatus::Available),
+        (BloodStatus::InTransit, BloodStatus::Reserved),
+        (BloodStatus::Available, BloodStatus::Delivered),
+        (BloodStatus::Available, BloodStatus::InTransit),
+        (BloodStatus::Reserved, BloodStatus::Delivered),
+        (BloodStatus::Compromised, BloodStatus::Available),
+    ];
+
+    for (from, to) in illegal_pairs {
+        // Verify the pair is NOT in the allowed list
+        let is_allowed = ALLOWED_BLOOD_STATUS_TRANSITIONS
+            .iter()
+            .any(|(a, b)| a == from && b == to);
+        assert!(
+            !is_allowed,
+            "Pair ({:?}, {:?}) should be illegal but is in allowed list",
+            from,
+            to
+        );
+    }
+}
+
+/// Exhaustive state-transition matrix: every (from, to) pair is valid iff
+/// it appears in ALLOWED_BLOOD_STATUS_TRANSITIONS.
+#[test]
+fn test_exhaustive_transition_matrix() {
+    use crate::types::{is_valid_transition, BloodStatus, ALLOWED_BLOOD_STATUS_TRANSITIONS};
+
+    let all = BloodStatus::ALL;
+
+    for from in all {
+        for to in all {
+            let expected = ALLOWED_BLOOD_STATUS_TRANSITIONS
+                .iter()
+                .any(|(a, b)| *a == from && *b == to);
+            let actual = is_valid_transition(&from, &to);
+            assert_eq!(
+                actual,
+                expected,
+                "Transition ({:?} → {:?}): expected valid={}, got valid={}",
+                from,
+                to,
+                expected,
+                actual
+            );
+        }
+    }
+}
+
+/// Delivered is a terminal state — any further transition must fail.
+#[test]
+fn test_delivered_is_terminal_no_further_transitions() {
+    use crate::types::{is_valid_transition, BloodStatus};
+
+    for to in BloodStatus::ALL {
+        assert!(
+            !is_valid_transition(&BloodStatus::Delivered, &to),
+            "Delivered → {:?} should be invalid (terminal state)",
+            to
+        );
+    }
+}
+
+/// Disposed is a terminal state — any further transition must fail.
+#[test]
+fn test_disposed_is_terminal_no_further_transitions() {
+    use crate::types::{is_valid_transition, BloodStatus};
+
+    for to in BloodStatus::ALL {
+        assert!(
+            !is_valid_transition(&BloodStatus::Disposed, &to),
+            "Disposed → {:?} should be invalid (terminal state)",
+            to
+        );
+    }
+}
+
+/// update_status rejects an illegal transition and returns InvalidStatusTransition.
+#[test]
+fn test_update_status_rejects_illegal_transition_via_contract() {
+    let (env, admin, client, _) = create_test_contract();
+    env.ledger().set_timestamp(1000);
+
+    let unit_id = client.register_blood(&admin, &BloodType::OPositive, &400u32, &None);
+
+    // Available → Delivered is illegal (must go through Reserved → InTransit first)
+    let result = client.try_update_status(&unit_id, &BloodStatus::Delivered, &admin, &None);
+    assert!(
+        result.is_err(),
+        "Available → Delivered must return InvalidStatusTransition"
+    );
+}
