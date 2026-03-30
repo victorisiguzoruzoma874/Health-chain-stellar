@@ -93,6 +93,23 @@ pub struct DonationPledge {
     pub created_at: u64,
 }
 
+/// On-chain vesting schedule for donor reward tokens.
+/// Enforces a cliff + linear vesting so donors cannot withdraw immediately.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VestingSchedule {
+    /// Donor who will receive the vested tokens
+    pub donor: Address,
+    /// Total reward tokens to vest
+    pub total_amount: i128,
+    /// Ledger timestamp before which no tokens can be claimed
+    pub cliff_timestamp: u64,
+    /// Ledger timestamp at which 100% of tokens are vested
+    pub vest_end_timestamp: u64,
+    /// Amount already claimed by the donor
+    pub claimed: i128,
+}
+
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -105,6 +122,12 @@ pub enum Error {
     InsufficientEscrowFunds = 505,
     Unauthorized = 506,
     ContractPaused = 507,
+    /// Claim attempted before the cliff timestamp
+    CliffNotReached = 508,
+    /// Vesting schedule not found for this donor
+    VestingNotFound = 509,
+    /// No additional tokens are claimable at this time
+    NothingToClaim = 510,
 }
 
 // ── Storage keys ───────────────────────────────────────────────────────────────
@@ -113,10 +136,7 @@ const PAYMENT_COUNTER: soroban_sdk::Symbol = symbol_short!("PAY_CTR");
 const PLEDGE_COUNTER: soroban_sdk::Symbol = symbol_short!("PLG_CTR");
 const ADMIN_KEY: soroban_sdk::Symbol = symbol_short!("ADMIN");
 const PAUSED_KEY: soroban_sdk::Symbol = symbol_short!("PAUSED");
-/// Running aggregate stats — updated on every status transition, O(1) reads.
-const STATS_KEY: soroban_sdk::Symbol = symbol_short!("STATS");
-/// request_id → payment_id index stored as a Map<u64, u64> in instance storage.
-const REQ_IDX: soroban_sdk::Symbol = symbol_short!("REQ_IDX");
+const REWARD_TOKEN_KEY: soroban_sdk::Symbol = symbol_short!("RWD_TOK");
 
 fn payment_key(id: u64) -> (u64, &'static str) {
     (id, "pay")
@@ -181,111 +201,18 @@ fn load_pledge(env: &Env, id: u64) -> Option<DonationPledge> {
     env.storage().persistent().get(&pledge_key(id))
 }
 
-// ── Index helpers ──────────────────────────────────────────────────────────────
-
-/// Append `payment_id` to the payer index. O(1) amortised.
-fn index_by_payer(env: &Env, payer: &Address, payment_id: u64) {
-    let key = payer_index_key(payer);
-    let mut ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
-    ids.push_back(payment_id);
-    env.storage().persistent().set(&key, &ids);
+fn vesting_key(donor: &Address) -> (Address, &'static str) {
+    (donor.clone(), "vest")
 }
 
-/// Append `payment_id` to the payee index. O(1) amortised.
-fn index_by_payee(env: &Env, payee: &Address, payment_id: u64) {
-    let key = payee_index_key(payee);
-    let mut ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
-    ids.push_back(payment_id);
-    env.storage().persistent().set(&key, &ids);
+fn store_vesting(env: &Env, schedule: &VestingSchedule) {
+    env.storage()
+        .persistent()
+        .set(&vesting_key(&schedule.donor), schedule);
 }
 
-/// Append `payment_id` to the status index bucket. O(1) amortised.
-fn index_by_status(env: &Env, status: PaymentStatus, payment_id: u64) {
-    let key = status_index_key(status);
-    let mut ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
-    ids.push_back(payment_id);
-    env.storage().persistent().set(&key, &ids);
-}
-
-/// Remove `payment_id` from a status index bucket. O(n) but called only on
-/// status transitions, not on every read.
-fn remove_from_status_index(env: &Env, status: PaymentStatus, payment_id: u64) {
-    let key = status_index_key(status);
-    let ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
-    let mut updated: Vec<u64> = Vec::new(env);
-    for i in 0..ids.len() {
-        let id = ids.get(i).unwrap();
-        if id != payment_id {
-            updated.push_back(id);
-        }
-    }
-    env.storage().persistent().set(&key, &updated);
-}
-
-/// Record request_id → payment_id in the instance-level Map index.
-fn index_by_request(env: &Env, request_id: u64, payment_id: u64) {
-    let mut map: Map<u64, u64> = env
-        .storage()
-        .instance()
-        .get(&REQ_IDX)
-        .unwrap_or(Map::new(env));
-    map.set(request_id, payment_id);
-    env.storage().instance().set(&REQ_IDX, &map);
-}
-
-// ── Running stats helpers ──────────────────────────────────────────────────────
-
-fn load_stats(env: &Env) -> PaymentStats {
-    env.storage().instance().get(&STATS_KEY).unwrap_or(PaymentStats {
-        total_locked: 0,
-        total_released: 0,
-        total_refunded: 0,
-        count_locked: 0,
-        count_released: 0,
-        count_refunded: 0,
-    })
-}
-
-fn save_stats(env: &Env, stats: &PaymentStats) {
-    env.storage().instance().set(&STATS_KEY, stats);
-}
-
-/// Update running totals when a payment transitions from `old` to `new` status.
-fn update_stats_on_transition(env: &Env, amount: i128, old: PaymentStatus, new: PaymentStatus) {
-    let mut s = load_stats(env);
-    // Subtract from old bucket
-    match old {
-        PaymentStatus::Locked => {
-            s.total_locked = s.total_locked.saturating_sub(amount);
-            s.count_locked = s.count_locked.saturating_sub(1);
-        }
-        PaymentStatus::Released => {
-            s.total_released = s.total_released.saturating_sub(amount);
-            s.count_released = s.count_released.saturating_sub(1);
-        }
-        PaymentStatus::Refunded => {
-            s.total_refunded = s.total_refunded.saturating_sub(amount);
-            s.count_refunded = s.count_refunded.saturating_sub(1);
-        }
-        _ => {}
-    }
-    // Add to new bucket
-    match new {
-        PaymentStatus::Locked => {
-            s.total_locked = s.total_locked.saturating_add(amount);
-            s.count_locked = s.count_locked.saturating_add(1);
-        }
-        PaymentStatus::Released => {
-            s.total_released = s.total_released.saturating_add(amount);
-            s.count_released = s.count_released.saturating_add(1);
-        }
-        PaymentStatus::Refunded => {
-            s.total_refunded = s.total_refunded.saturating_add(amount);
-            s.count_refunded = s.count_refunded.saturating_add(1);
-        }
-        _ => {}
-    }
-    save_stats(env, &s);
+fn load_vesting(env: &Env, donor: &Address) -> Option<VestingSchedule> {
+    env.storage().persistent().get(&vesting_key(donor))
 }
 
 // ── Contract ───────────────────────────────────────────────────────────────────
@@ -655,6 +582,130 @@ impl PaymentContract {
         p.active = active;
         store_pledge(&env, &p);
         Ok(())
+    }
+
+    // ── Vesting ────────────────────────────────────────────────────────────────
+
+    /// Create a vesting schedule for a donor's reward tokens. Admin only.
+    ///
+    /// Tokens vest linearly from `cliff_timestamp` to `vest_end_timestamp`.
+    /// No tokens can be claimed before the cliff.
+    ///
+    /// # Arguments
+    /// * `donor`         - Recipient of the vested tokens
+    /// * `total_amount`  - Total reward tokens to vest
+    /// * `cliff_secs`    - Seconds from now until the cliff
+    /// * `duration_secs` - Total vesting duration in seconds (from now)
+    ///
+    /// # Errors
+    /// - `Unauthorized`   - Caller is not the admin
+    /// - `InvalidAmount`  - `total_amount` ≤ 0 or `duration_secs` = 0
+    pub fn create_vesting(
+        env: Env,
+        admin: Address,
+        donor: Address,
+        total_amount: i128,
+        cliff_secs: u64,
+        duration_secs: u64,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+
+        if total_amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        if duration_secs == 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let now = env.ledger().timestamp();
+        let schedule = VestingSchedule {
+            donor: donor.clone(),
+            total_amount,
+            cliff_timestamp: now + cliff_secs,
+            vest_end_timestamp: now + duration_secs,
+            claimed: 0,
+        };
+
+        store_vesting(&env, &schedule);
+
+        env.events().publish(
+            (symbol_short!("vest"), symbol_short!("created")),
+            (donor, total_amount, now + cliff_secs, now + duration_secs),
+        );
+
+        Ok(())
+    }
+
+    /// Claim linearly vested tokens for the calling donor.
+    ///
+    /// Calculates the claimable amount at the current ledger time and transfers
+    /// only that portion to the donor via the reward token contract.
+    ///
+    /// # Errors
+    /// - `VestingNotFound`  - No schedule exists for this donor
+    /// - `CliffNotReached`  - Current time is before the cliff timestamp
+    /// - `NothingToClaim`   - All vested tokens have already been claimed
+    pub fn claim_vested(env: Env, donor: Address, reward_token: Address) -> Result<i128, Error> {
+        donor.require_auth();
+        Self::require_not_paused(&env)?;
+
+        let mut schedule = load_vesting(&env, &donor).ok_or(Error::VestingNotFound)?;
+
+        let now = env.ledger().timestamp();
+
+        if now < schedule.cliff_timestamp {
+            return Err(Error::CliffNotReached);
+        }
+
+        // Linear vesting: vested = total * elapsed / duration
+        let vested = if now >= schedule.vest_end_timestamp {
+            schedule.total_amount
+        } else {
+            let elapsed = now - schedule.cliff_timestamp;
+            let duration = schedule.vest_end_timestamp - schedule.cliff_timestamp;
+            // Use i128 arithmetic; duration > 0 guaranteed by create_vesting
+            (schedule.total_amount * elapsed as i128) / duration as i128
+        };
+
+        let claimable = vested - schedule.claimed;
+        if claimable <= 0 {
+            return Err(Error::NothingToClaim);
+        }
+
+        // Guard: donor can never claim more than total_amount across all claims
+        let new_claimed = schedule.claimed + claimable;
+        if new_claimed > schedule.total_amount {
+            return Err(Error::NothingToClaim);
+        }
+
+        schedule.claimed = new_claimed;
+        store_vesting(&env, &schedule);
+
+        // Transfer claimable tokens from this contract to the donor
+        let token_client = token::Client::new(&env, &reward_token);
+        token_client.transfer(&env.current_contract_address(), &donor, &claimable);
+
+        env.events().publish(
+            (symbol_short!("vest"), symbol_short!("claimed")),
+            (donor, claimable, new_claimed),
+        );
+
+        Ok(claimable)
+    }
+
+    /// Get the vesting schedule for a donor.
+    pub fn get_vesting(env: Env, donor: Address) -> Result<VestingSchedule, Error> {
+        load_vesting(&env, &donor).ok_or(Error::VestingNotFound)
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────────
