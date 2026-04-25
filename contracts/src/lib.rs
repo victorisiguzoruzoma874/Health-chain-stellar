@@ -146,6 +146,14 @@ pub enum WithdrawalReason {
     Other,
 }
 
+/// Lifecycle state for organizations, hospitals, and blood banks.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LifecycleState {
+    Active,
+    Inactive,
+}
+
 /// Urgency level enumeration
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -332,6 +340,18 @@ pub struct RequestStatusChangeEvent {
     pub reason: Option<String>,
 }
 
+/// Event data for actor lifecycle state transitions.
+#[contracttype]
+#[derive(Clone)]
+pub struct ActorStateChangeEvent {
+    pub entity_id: Address,
+    pub old_state: LifecycleState,
+    pub new_state: LifecycleState,
+    pub changed_by: Address,
+    pub reason: Option<String>,
+    pub timestamp: u64,
+}
+
 /// Event data for request approval
 #[contracttype]
 #[derive(Clone)]
@@ -506,6 +526,10 @@ pub struct Organization {
     pub id: Address,
     pub verified: bool,
     pub verified_timestamp: Option<u64>,
+    pub state: LifecycleState,
+    pub state_changed_by: Option<Address>,
+    pub state_changed_at: Option<u64>,
+    pub state_change_reason: Option<String>,
 }
 
 /// Composite storage keys for organization verification.
@@ -575,14 +599,32 @@ impl HealthChainContract {
             .ok_or(Error::Unauthorized)?;
         admin.require_auth();
 
-        let mut banks: Map<Address, bool> = env
+        let mut banks: Map<Address, LifecycleState> = env
             .storage()
             .persistent()
             .get(&BLOOD_BANKS)
             .unwrap_or(Map::new(&env));
 
-        banks.set(bank_id.clone(), true);
+        if banks.get(bank_id.clone()).is_some() {
+            return Err(Error::DuplicateRegistration);
+        }
+
+        banks.set(bank_id.clone(), LifecycleState::Active);
         env.storage().persistent().set(&BLOOD_BANKS, &banks);
+
+        env.events().publish(
+            (symbol_short!("bank"), symbol_short!("state")),
+            ActorStateChangeEvent {
+                entity_id: bank_id.clone(),
+                old_state: LifecycleState::Inactive,
+                new_state: LifecycleState::Active,
+                changed_by: admin.clone(),
+                reason: Some(String::from_str(&env, "registration")),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        env.events().publish((symbol_short!("bank"), symbol_short!("reg")), bank_id);
 
         Ok(())
     }
@@ -596,16 +638,260 @@ impl HealthChainContract {
             .ok_or(Error::Unauthorized)?;
         admin.require_auth();
 
-        let mut hospitals: Map<Address, bool> = env
+        let mut hospitals: Map<Address, LifecycleState> = env
             .storage()
             .persistent()
             .get(&HOSPITALS)
             .unwrap_or(Map::new(&env));
 
-        hospitals.set(hospital_id.clone(), true);
+        if hospitals.get(hospital_id.clone()).is_some() {
+            return Err(Error::DuplicateRegistration);
+        }
+
+        hospitals.set(hospital_id.clone(), LifecycleState::Active);
         env.storage().persistent().set(&HOSPITALS, &hospitals);
 
+        env.events().publish(
+            (symbol_short!("hospital"), symbol_short!("state")),
+            ActorStateChangeEvent {
+                entity_id: hospital_id.clone(),
+                old_state: LifecycleState::Inactive,
+                new_state: LifecycleState::Active,
+                changed_by: admin.clone(),
+                reason: Some(String::from_str(&env, "registration")),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        env.events().publish((symbol_short!("hospital"), symbol_short!("reg")), hospital_id);
+
         Ok(())
+    }
+
+    /// Activate a blood bank (admin only)
+    pub fn activate_blood_bank(
+        env: Env,
+        admin: Address,
+        bank_id: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut banks: Map<Address, LifecycleState> = env
+            .storage()
+            .persistent()
+            .get(&BLOOD_BANKS)
+            .unwrap_or(Map::new(&env));
+
+        let old_state = banks
+            .get(bank_id.clone())
+            .unwrap_or(LifecycleState::Inactive);
+        banks.set(bank_id.clone(), LifecycleState::Active);
+        env.storage().persistent().set(&BLOOD_BANKS, &banks);
+
+        env.events().publish(
+            (symbol_short!("bank"), symbol_short!("state")),
+            ActorStateChangeEvent {
+                entity_id: bank_id.clone(),
+                old_state,
+                new_state: LifecycleState::Active,
+                changed_by: admin.clone(),
+                reason: Some(String::from_str(&env, "activate")),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Deactivate a blood bank (admin only)
+    pub fn deactivate_blood_bank(
+        env: Env,
+        admin: Address,
+        bank_id: Address,
+        reason: String,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut banks: Map<Address, LifecycleState> = env
+            .storage()
+            .persistent()
+            .get(&BLOOD_BANKS)
+            .unwrap_or(Map::new(&env));
+
+        let old_state = banks
+            .get(bank_id.clone())
+            .unwrap_or(LifecycleState::Inactive);
+        banks.set(bank_id.clone(), LifecycleState::Inactive);
+        env.storage().persistent().set(&BLOOD_BANKS, &banks);
+
+        env.events().publish(
+            (symbol_short!("bank"), symbol_short!("state")),
+            ActorStateChangeEvent {
+                entity_id: bank_id.clone(),
+                old_state,
+                new_state: LifecycleState::Inactive,
+                changed_by: admin.clone(),
+                reason: Some(reason),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Activate a hospital (admin only)
+    pub fn activate_hospital(
+        env: Env,
+        admin: Address,
+        hospital_id: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut hospitals: Map<Address, LifecycleState> = env
+            .storage()
+            .persistent()
+            .get(&HOSPITALS)
+            .unwrap_or(Map::new(&env));
+
+        let old_state = hospitals
+            .get(hospital_id.clone())
+            .unwrap_or(LifecycleState::Inactive);
+        hospitals.set(hospital_id.clone(), LifecycleState::Active);
+        env.storage().persistent().set(&HOSPITALS, &hospitals);
+
+        env.events().publish(
+            (symbol_short!("hospital"), symbol_short!("state")),
+            ActorStateChangeEvent {
+                entity_id: hospital_id.clone(),
+                old_state,
+                new_state: LifecycleState::Active,
+                changed_by: admin.clone(),
+                reason: Some(String::from_str(&env, "activate")),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Deactivate a hospital (admin only)
+    pub fn deactivate_hospital(
+        env: Env,
+        admin: Address,
+        hospital_id: Address,
+        reason: String,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(Error::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut hospitals: Map<Address, LifecycleState> = env
+            .storage()
+            .persistent()
+            .get(&HOSPITALS)
+            .unwrap_or(Map::new(&env));
+
+        let old_state = hospitals
+            .get(hospital_id.clone())
+            .unwrap_or(LifecycleState::Inactive);
+        hospitals.set(hospital_id.clone(), LifecycleState::Inactive);
+        env.storage().persistent().set(&HOSPITALS, &hospitals);
+
+        env.events().publish(
+            (symbol_short!("hospital"), symbol_short!("state")),
+            ActorStateChangeEvent {
+                entity_id: hospital_id.clone(),
+                old_state,
+                new_state: LifecycleState::Inactive,
+                changed_by: admin.clone(),
+                reason: Some(reason),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Get the lifecycle state of an address registered as a blood bank.
+    pub fn get_blood_bank_state(
+        env: Env,
+        bank_id: Address,
+    ) -> LifecycleState {
+        let banks: Map<Address, LifecycleState> = env
+            .storage()
+            .persistent()
+            .get(&BLOOD_BANKS)
+            .unwrap_or(Map::new(&env));
+
+        banks.get(bank_id).unwrap_or(LifecycleState::Inactive)
+    }
+
+    /// Get the lifecycle state of an address registered as a hospital.
+    pub fn get_hospital_state(
+        env: Env,
+        hospital_id: Address,
+    ) -> LifecycleState {
+        let hospitals: Map<Address, LifecycleState> = env
+            .storage()
+            .persistent()
+            .get(&HOSPITALS)
+            .unwrap_or(Map::new(&env));
+
+        hospitals.get(hospital_id).unwrap_or(LifecycleState::Inactive)
+    }
+
+    /// Get the lifecycle state of an organization.
+    pub fn get_organization_state(env: Env, org_id: Address) -> LifecycleState {
+        let org_key = OrgKey::Org(org_id);
+        let organization: Organization = env
+            .storage()
+            .persistent()
+            .get(&org_key)
+            .unwrap_or(Organization {
+                id: org_id.clone(),
+                verified: false,
+                verified_timestamp: None,
+                state: LifecycleState::Inactive,
+                state_changed_by: None,
+                state_changed_at: None,
+                state_change_reason: None,
+            });
+
+        organization.state
     }
 
     // ── WRITE ─────────────────────────────────────────────────────────────────
@@ -625,13 +911,7 @@ impl HealthChainContract {
         // Authenticate and verify blood bank
         bank_id.require_auth();
 
-        let banks: Map<Address, bool> = env
-            .storage()
-            .persistent()
-            .get(&BLOOD_BANKS)
-            .unwrap_or(Map::new(&env));
-
-        if !banks.get(bank_id.clone()).unwrap_or(false) {
+        if !Self::is_blood_bank(env.clone(), bank_id.clone()) {
             return Err(Error::Unauthorized);
         }
 
@@ -654,13 +934,7 @@ impl HealthChainContract {
     ) -> Result<Vec<u64>, Error> {
         bank_id.require_auth();
 
-        let banks: Map<Address, bool> = env
-            .storage()
-            .persistent()
-            .get(&BLOOD_BANKS)
-            .unwrap_or(Map::new(&env));
-
-        if !banks.get(bank_id.clone()).unwrap_or(false) {
+        if !Self::is_blood_bank(env.clone(), bank_id.clone()) {
             return Err(Error::Unauthorized);
         }
 
@@ -689,13 +963,16 @@ impl HealthChainContract {
 
     /// Check if an address is an authorized blood bank
     pub fn is_blood_bank(env: Env, bank_id: Address) -> bool {
-        let banks: Map<Address, bool> = env
+        let banks: Map<Address, LifecycleState> = env
             .storage()
             .persistent()
             .get(&BLOOD_BANKS)
             .unwrap_or(Map::new(&env));
 
-        banks.get(bank_id).unwrap_or(false)
+        banks
+            .get(bank_id)
+            .unwrap_or(LifecycleState::Inactive)
+            == LifecycleState::Active
     }
 
     /// Allocate blood unit to a hospital
@@ -1650,13 +1927,16 @@ impl HealthChainContract {
 
     /// Check if an address is an authorized hospital
     pub fn is_hospital(env: Env, hospital_id: Address) -> bool {
-        let hospitals: Map<Address, bool> = env
+        let hospitals: Map<Address, LifecycleState> = env
             .storage()
             .persistent()
             .get(&HOSPITALS)
             .unwrap_or(Map::new(&env));
 
-        hospitals.get(hospital_id).unwrap_or(false)
+        hospitals
+            .get(hospital_id)
+            .unwrap_or(LifecycleState::Inactive)
+            == LifecycleState::Active
     }
 
     /// Helper: Derive deterministic event_id for custody transfers
@@ -1857,13 +2137,7 @@ impl HealthChainContract {
     ) -> Result<u64, Error> {
         hospital_id.require_auth();
 
-        let hospitals: Map<Address, bool> = env
-            .storage()
-            .persistent()
-            .get(&HOSPITALS)
-            .unwrap_or(Map::new(&env));
-
-        if !hospitals.get(hospital_id.clone()).unwrap_or(false) {
+        if !Self::is_hospital(env.clone(), hospital_id.clone()) {
             return Err(Error::Unauthorized);
         }
 
@@ -3141,6 +3415,10 @@ impl HealthChainContract {
             id: org_id.clone(),
             verified: false,
             verified_timestamp: None,
+            state: LifecycleState::Inactive,
+            state_changed_by: None,
+            state_changed_at: None,
+            state_change_reason: None,
         };
 
         env.storage().persistent().set(&org_key, &organization);
@@ -3181,19 +3459,32 @@ impl HealthChainContract {
             return Err(Error::AlreadyVerified);
         }
 
+        let old_state = organization.state;
         organization.verified = true;
         organization.verified_timestamp = Some(env.ledger().timestamp());
+        organization.state = LifecycleState::Active;
+        organization.state_changed_by = Some(admin.clone());
+        organization.state_changed_at = Some(env.ledger().timestamp());
+        organization.state_change_reason = Some(String::from_str(&env, "verification"));
         env.storage().persistent().set(&org_key, &organization);
 
         let verifier_key = OrgKey::Verifier(org_id.clone());
         env.storage().persistent().set(&verifier_key, &admin);
 
         env.events().publish(
-            (
-                symbol_short!("org"),
-                symbol_short!("verified"),
-                symbol_short!("v1"),
-            ),
+            (symbol_short!("org"), symbol_short!("state")),
+            ActorStateChangeEvent {
+                entity_id: org_id.clone(),
+                old_state,
+                new_state: LifecycleState::Active,
+                changed_by: admin.clone(),
+                reason: Some(String::from_str(&env, "verification")),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        env.events().publish(
+            (symbol_short!("org"), symbol_short!("verified")),
             (org_id, admin, env.ledger().timestamp()),
         );
 
@@ -3225,19 +3516,32 @@ impl HealthChainContract {
             .get(&org_key)
             .ok_or(Error::OrganizationNotFound)?;
 
+        let old_state = organization.state;
         organization.verified = false;
         organization.verified_timestamp = None;
+        organization.state = LifecycleState::Inactive;
+        organization.state_changed_by = Some(admin.clone());
+        organization.state_changed_at = Some(env.ledger().timestamp());
+        organization.state_change_reason = Some(reason.clone());
         env.storage().persistent().set(&org_key, &organization);
 
         let reason_key = OrgKey::UnverifyReason(org_id.clone());
         env.storage().persistent().set(&reason_key, &reason);
 
         env.events().publish(
-            (
-                symbol_short!("org"),
-                symbol_short!("unverif"),
-                symbol_short!("v1"),
-            ),
+            (symbol_short!("org"), symbol_short!("state")),
+            ActorStateChangeEvent {
+                entity_id: org_id.clone(),
+                old_state: LifecycleState::Active,
+                new_state: LifecycleState::Inactive,
+                changed_by: admin.clone(),
+                reason: Some(reason.clone()),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        env.events().publish(
+            (symbol_short!("org"), symbol_short!("unverif")),
             (org_id, reason),
         );
 
@@ -3478,7 +3782,7 @@ mod test {
 
         // "Revoke" by clearing BANKS map directly
         env.as_contract(&contract_id, || {
-            let empty_banks = Map::<Address, bool>::new(&env);
+            let empty_banks = Map::<Address, LifecycleState>::new(&env);
             env.storage().persistent().set(&BLOOD_BANKS, &empty_banks);
         });
 
@@ -6759,5 +7063,67 @@ mod test {
         let reason = String::from_str(&env, "Test");
         env.mock_all_auths();
         client.unverify_organization(&admin, &org, &reason);
+    }
+
+    #[test]
+    fn test_hospital_lifecycle_state_blocks_requests() {
+        let env = Env::default();
+        let (_, admin, client) = setup_contract_with_admin(&env);
+        let hospital = Address::generate(&env);
+
+        env.mock_all_auths();
+        client.register_hospital(&hospital);
+
+        let reason = String::from_str(&env, "Suspended for compliance");
+        env.mock_all_auths();
+        client.deactivate_hospital(&admin, &hospital, &reason);
+
+        assert_eq!(client.is_hospital(&hospital), false);
+
+        env.mock_all_auths();
+        let result = client.create_request(
+            &hospital,
+            &BloodType::APositive,
+            &450,
+            &UrgencyLevel::Routine,
+            &(env.ledger().timestamp() + 86400),
+            &String::from_str(&env, "HOSPITAL-123"),
+        );
+        assert_eq!(result, Err(Error::Unauthorized));
+
+        env.mock_all_auths();
+        client.activate_hospital(&admin, &hospital);
+        assert_eq!(client.is_hospital(&hospital), true);
+    }
+
+    #[test]
+    fn test_blood_bank_lifecycle_state_blocks_registration() {
+        let env = Env::default();
+        let (_, admin, client) = setup_contract_with_admin(&env);
+        let bank = Address::generate(&env);
+
+        env.mock_all_auths();
+        client.register_blood_bank(&bank);
+
+        let reason = String::from_str(&env, "Compliance suspension");
+        env.mock_all_auths();
+        client.deactivate_blood_bank(&admin, &bank, &reason);
+
+        assert_eq!(client.is_blood_bank(&bank), false);
+
+        env.mock_all_auths();
+        let result = client.register_blood(
+            &bank,
+            &BloodType::OPositive,
+            &BloodComponent::WholeBlood,
+            &450,
+            &(env.ledger().timestamp() + 86400),
+            &Some(String::from_str(&env, "donor1")),
+        );
+        assert_eq!(result, Err(Error::Unauthorized));
+
+        env.mock_all_auths();
+        client.activate_blood_bank(&admin, &bank);
+        assert_eq!(client.is_blood_bank(&bank), true);
     }
 }
