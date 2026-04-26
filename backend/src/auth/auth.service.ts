@@ -29,6 +29,7 @@ import { TwoFactorAuthEntity } from '../users/entities/two-factor-auth.entity';
 import { JwtKeyService } from './jwt-key.service';
 import { JwtPayload } from './jwt.strategy';
 import { AuthSessionRepository } from './repositories/auth-session.repository';
+import { SessionRiskService, RiskLevel } from './session-risk.service';
 import { validatePasswordStrength } from './utils/password-strength.util';
 import {
   hashPassword,
@@ -63,6 +64,7 @@ export class AuthService {
     private readonly userActivityService: UserActivityService,
     private readonly securityEventLogger: SecurityEventLoggerService,
     private readonly mfaService: MfaService,
+    private readonly sessionRiskService: SessionRiskService,
   ) {
     this.circuitBreaker = new RedisCircuitBreaker();
     this.fallbackStore = new AuthSessionFallbackStore();
@@ -160,6 +162,12 @@ export class AuthService {
     await this.createSession(user, sessionId, refreshExpiresInSeconds);
     await this.enforceConcurrentSessionLimit(user.id);
 
+    // Score session risk and log if elevated
+    const risk = await this.sessionRiskService.scoreSession(
+      user.id, sessionId,
+      { ipAddress: meta.ipAddress, userAgent: meta.userAgent, geoHint: meta.geoHint, createdAt: new Date() },
+    ).catch(() => null);
+
     await this.securityEventLogger.logEvent({
       eventType: SecurityEventType.AUTH_LOGIN_SUCCESS,
       userId: user.id,
@@ -169,11 +177,28 @@ export class AuthService {
       metadata: { role: payload.role },
       ipAddress: meta.ipAddress ?? null,
       userAgent: meta.userAgent ?? null,
+      ...(risk && { riskScore: risk.score, riskLevel: risk.level, riskSignals: risk.signals as unknown as Record<string, boolean> }),
     }).catch(() => undefined);
+
+    if (risk && risk.requiresStepUp) {
+      await this.securityEventLogger.logEvent({
+        eventType: SecurityEventType.AUTH_STEP_UP_REQUIRED,
+        userId: user.id,
+        email: user.email,
+        sessionId,
+        description: `Step-up auth required: risk score ${risk.score} (${risk.level})`,
+        riskScore: risk.score,
+        riskLevel: risk.level,
+        riskSignals: risk.signals as unknown as Record<string, boolean>,
+        ipAddress: meta.ipAddress ?? null,
+        userAgent: meta.userAgent ?? null,
+      }).catch(() => undefined);
+    }
 
     return {
       access_token: accessToken,
       refresh_token: refreshToken,
+      ...(risk?.requiresStepUp && { step_up_required: true, risk_level: risk.level }),
     };
   }
 
@@ -198,10 +223,18 @@ export class AuthService {
       sid: sessionId,
     };
 
-    const { accessToken, refreshToken, refreshExpiresInSeconds } =
-      this.issueTokens(payload);
+    const {
+      accessToken,
+      refreshToken,
+      refreshExpiresInSeconds,
+    } = this.issueTokens(payload);
     await this.createSession(user, sessionId, refreshExpiresInSeconds, meta);
     await this.enforceConcurrentSessionLimit(user.id);
+
+    const risk = await this.sessionRiskService.scoreSession(
+      user.id, sessionId,
+      { ipAddress: meta.ipAddress, userAgent: meta.userAgent, geoHint: meta.geoHint, createdAt: new Date() },
+    ).catch(() => null);
 
     await this.securityEventLogger.logEvent({
       eventType: SecurityEventType.AUTH_LOGIN_SUCCESS,
@@ -212,9 +245,14 @@ export class AuthService {
       metadata: { role: payload.role, mfa: true },
       ipAddress: meta.ipAddress ?? null,
       userAgent: meta.userAgent ?? null,
+      ...(risk && { riskScore: risk.score, riskLevel: risk.level, riskSignals: risk.signals as unknown as Record<string, boolean> }),
     }).catch(() => undefined);
 
-    return { access_token: accessToken, refresh_token: refreshToken };
+    return {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      ...(risk?.requiresStepUp && { step_up_required: true, risk_level: risk.level }),
+    };
   }
 
   async register(registerDto: {
@@ -444,7 +482,63 @@ export class AuthService {
     const sessions = await Promise.all(
       sessionIds.map((sid) => this.getSessionById(sid)),
     );
-    return sessions.filter((session) => session && !session.revokedAt);
+    const active = sessions.filter((session) => session && !session.revokedAt);
+
+    // Attach risk scores to each session
+    return Promise.all(
+      active.map(async (session) => {
+        if (!session) return session;
+        const risk = await this.sessionRiskService.scoreSession(
+          userId,
+          session.sessionId ?? '',
+          { ipAddress: session.ipAddress, userAgent: session.userAgent, geoHint: session.geoHint },
+        ).catch(() => null);
+        return {
+          ...session,
+          riskScore: risk?.score ?? null,
+          riskLevel: risk?.level ?? null,
+          riskSignals: risk?.signals ?? null,
+        };
+      }),
+    );
+  }
+
+  /**
+   * Revoke a session if its risk score meets or exceeds the given threshold.
+   * Returns the risk result regardless of whether revocation occurred.
+   */
+  async revokeIfRisky(
+    userId: string,
+    sessionId: string,
+    minRiskLevel: RiskLevel = RiskLevel.HIGH,
+  ) {
+    const session = await this.getSessionById(sessionId);
+    if (!session || session.revokedAt) {
+      return { revoked: false, reason: 'session_not_found_or_already_revoked' };
+    }
+
+    const risk = await this.sessionRiskService.scoreSession(
+      userId, sessionId,
+      { ipAddress: session.ipAddress, userAgent: session.userAgent, geoHint: session.geoHint },
+    );
+
+    const levelOrder = [RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL];
+    const shouldRevoke = levelOrder.indexOf(risk.level) >= levelOrder.indexOf(minRiskLevel);
+
+    if (shouldRevoke) {
+      await this.revokeSession(userId, sessionId);
+      await this.securityEventLogger.logEvent({
+        eventType: SecurityEventType.AUTH_SESSION_RISK_ELEVATED,
+        userId,
+        sessionId,
+        description: `Session auto-revoked due to risk level ${risk.level} (score ${risk.score})`,
+        riskScore: risk.score,
+        riskLevel: risk.level,
+        riskSignals: risk.signals as unknown as Record<string, boolean>,
+      }).catch(() => undefined);
+    }
+
+    return { revoked: shouldRevoke, risk };
   }
 
   /**
