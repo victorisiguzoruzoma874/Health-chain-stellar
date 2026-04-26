@@ -238,12 +238,44 @@ pub struct CustodyEvent {
 }
 
 /// Custody status enumeration
+/// Tracks the lifecycle of a custody transfer from initiation through successful
+/// confirmation, cancellation due to expiry, or recovery due to failure.
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CustodyStatus {
+    /// Transfer initiated, awaiting confirmation within expiry window
     Pending,
+    /// Transfer confirmed by receiving custodian within expiry window
     Confirmed,
+    /// Transfer cancelled due to expiry or explicit rejection
     Cancelled,
+    /// Transfer failed due to unit expiry during transit (recovery action)
+    Recovered,
+}
+
+/// Transfer recovery event for explicit tracking of failed/recovered transfers.
+/// Emitted when a transfer fails (e.g., unit expires during transit) or is rolled back
+/// (e.g., transfer cancelled after expiry). This allows backend projections to track
+/// all handoff attempts and recovery actions for complete custody chain reconstruction.
+#[contracttype]
+#[derive(Clone)]
+pub struct TransferRecoveryEvent {
+    /// The custody event ID that failed/was recovered
+    pub custody_event_id: String,
+    /// The unit ID being recovered
+    pub unit_id: u64,
+    /// Actor initiating or detecting the recovery
+    pub actor: Address,
+    /// Reason for recovery: 0 = unit_expired_during_transit, 1 = transfer_cancelled, 2 = other
+    pub recovery_reason: u32,
+    /// Previous custody status before recovery
+    pub previous_custody_status: CustodyStatus,
+    /// New custody status after recovery
+    pub new_custody_status: CustodyStatus,
+    /// Unit status after recovery (should be a valid, reusable state)
+    pub unit_status_after_recovery: BloodStatus,
+    /// Timestamp when recovery occurred
+    pub recovery_timestamp: u64,
 }
 
 /// Request status enumeration
@@ -1187,6 +1219,7 @@ impl HealthChainContract {
     /// Initiate blood transfer
     /// Creates a custody event with deterministically derived event_id
     pub fn initiate_transfer(env: Env, bank_id: Address, unit_id: u64) -> Result<String, Error> {
+        // CUSTODIAN AUTHORIZATION: Verify caller is authenticated and authorized actor
         bank_id.require_auth();
 
         if !Self::is_blood_bank(env.clone(), bank_id.clone()) {
@@ -1201,18 +1234,19 @@ impl HealthChainContract {
 
         let mut unit = units.get(unit_id).ok_or(Error::UnitNotFound)?;
 
-        // Verify the caller is the current custodian of this specific unit.
+        // INVARIANT: Only the current custodian (unit.bank_id) can initiate a transfer
+        // This ensures that only actors with actual possession can move the unit
         if unit.bank_id != bank_id {
             return Err(Error::NotCurrentCustodian);
         }
 
-        // --- NEW: REQUIREMENT #67 GUARD ---
+        // SAFETY GATE: Prevent transfer of expired units to maintain inventory integrity
         if unit.status == BloodStatus::Expired {
             return Err(Error::UnitExpired);
         }
-        // ---------------------------------
 
         let current_time = env.ledger().timestamp();
+        // EXPIRY ENFORCEMENT: Unit must have remaining shelf life to be transferred
         if unit.expiration_date <= current_time {
             return Err(Error::UnitExpired);
         }
@@ -1317,9 +1351,10 @@ impl HealthChainContract {
             return Err(Error::UnitIdTooLong);
         }
 
+        // CUSTODIAN AUTHORIZATION: Verify caller is authenticated and authorized actor
         hospital.require_auth();
 
-        // Verify hospital is registered
+        // Verify hospital is registered and authorized
         if !Self::is_hospital(env.clone(), hospital.clone()) {
             return Err(Error::UnauthorizedHospital);
         }
@@ -1335,12 +1370,13 @@ impl HealthChainContract {
             .get(event_id.clone())
             .ok_or(Error::UnitNotFound)?;
 
-        // Verify hospital is the recipient
+        // INVARIANT: Only the designated recipient (to_custodian) can confirm the transfer
+        // This ensures units can only be received by the intended hospital
         if custody_event.to_custodian != hospital {
             return Err(Error::Unauthorized);
         }
 
-        // Check custody status - must be Pending
+        // INVARIANT: Custody event must be in Pending status (not already confirmed/recovered)
         if custody_event.status != CustodyStatus::Pending {
             return Err(Error::InvalidStatus);
         }
@@ -1356,7 +1392,7 @@ impl HealthChainContract {
 
         let mut unit = units.get(unit_id).ok_or(Error::UnitNotFound)?;
 
-        // Check status - must be InTransit
+        // INVARIANT: Unit must be in InTransit status (transferred but not yet confirmed)
         if unit.status != BloodStatus::InTransit {
             return Err(Error::InvalidStatus);
         }
@@ -1364,21 +1400,24 @@ impl HealthChainContract {
         let initiated_at = custody_event.initiated_at;
         let current_time = env.ledger().timestamp();
 
-        // Transfer expiry check (at/after boundary is considered expired)
+        // EXPIRY ENFORCEMENT: Transfer window must not be expired (30-minute limit)
+        // At/after boundary is considered expired to ensure clean cutoffs
         if current_time >= initiated_at.saturating_add(TRANSFER_EXPIRY_SECONDS) {
             return Err(Error::TransferExpired);
         }
 
         let old_status = unit.status;
 
-        // Check if blood unit expired during transit
+        // RECOVERY PATH: Check if blood unit expired during transit
+        // If unit expiration passed while in transit, mark as recovered with explicit event
         if unit.expiration_date <= current_time {
             unit.status = BloodStatus::Expired;
             units.set(unit_id, unit.clone());
             env.storage().persistent().set(&BLOOD_UNITS, &units);
 
-            custody_event.status = CustodyStatus::Cancelled;
-            custody_events.set(event_id, custody_event);
+            // Update custody event to Recovered status to indicate recovery action
+            custody_event.status = CustodyStatus::Recovered;
+            custody_events.set(event_id.clone(), custody_event.clone());
             env.storage()
                 .persistent()
                 .set(&CUSTODY_EVENTS, &custody_events);
@@ -1390,6 +1429,26 @@ impl HealthChainContract {
                 BloodStatus::Expired,
                 hospital.clone(),
             );
+
+            // Emit explicit recovery event for backend projection consistency
+            env.events().publish(
+                (
+                    symbol_short!("custody"),
+                    symbol_short!("recover"),
+                    symbol_short!("v1"),
+                ),
+                TransferRecoveryEvent {
+                    custody_event_id: event_id,
+                    unit_id,
+                    actor: hospital.clone(),
+                    recovery_reason: 0, // 0 = unit_expired_during_transit
+                    previous_custody_status: CustodyStatus::Pending,
+                    new_custody_status: CustodyStatus::Recovered,
+                    unit_status_after_recovery: BloodStatus::Expired,
+                    recovery_timestamp: current_time,
+                },
+            );
+
             return Err(Error::UnitExpired);
         }
 
@@ -1442,6 +1501,7 @@ impl HealthChainContract {
             return Err(Error::UnitIdTooLong);
         }
 
+        // CUSTODIAN AUTHORIZATION: Verify caller is authenticated and authorized actor
         bank_id.require_auth();
 
         if !Self::is_blood_bank(env.clone(), bank_id.clone()) {
@@ -1459,12 +1519,13 @@ impl HealthChainContract {
             .get(event_id.clone())
             .ok_or(Error::UnitNotFound)?;
 
-        // Verify bank is the sender
+        // INVARIANT: Only the originating custodian (from_custodian) can cancel a transfer
+        // This ensures only the bank that initiated the transfer can roll it back
         if custody_event.from_custodian != bank_id {
             return Err(Error::Unauthorized);
         }
 
-        // Check custody status - must be Pending
+        // INVARIANT: Custody event must be in Pending status (not already confirmed/recovered)
         if custody_event.status != CustodyStatus::Pending {
             return Err(Error::InvalidStatus);
         }
@@ -1479,7 +1540,7 @@ impl HealthChainContract {
 
         let mut unit = units.get(unit_id).ok_or(Error::UnitNotFound)?;
 
-        // Only cancellable while in transit
+        // RECOVERY PATH: Unit must be in transit to be cancelled/recovered
         if unit.status != BloodStatus::InTransit {
             return Err(Error::InvalidStatus);
         }
@@ -1487,12 +1548,14 @@ impl HealthChainContract {
         let initiated_at = custody_event.initiated_at;
         let current_time = env.ledger().timestamp();
 
+        // EXPIRY ENFORCEMENT: Transfer must be expired (at least 30 minutes old) to be cancelled
+        // This prevents cancellation within the confirmation window and ensures fair delivery times
         if current_time < initiated_at.saturating_add(TRANSFER_EXPIRY_SECONDS) {
             return Err(Error::TransferNotExpired);
         }
 
-        // Update custody event status
-        custody_event.status = CustodyStatus::Cancelled;
+        // RECOVERY ACTION: Update custody event status to Recovered
+        custody_event.status = CustodyStatus::Recovered;
         custody_events.set(event_id.clone(), custody_event.clone());
         env.storage()
             .persistent()
@@ -1516,7 +1579,26 @@ impl HealthChainContract {
             bank_id.clone(),
         );
 
-        // Emit event
+        // Emit explicit recovery event for transfer cancellation/rollback
+        env.events().publish(
+            (
+                symbol_short!("custody"),
+                symbol_short!("recover"),
+                symbol_short!("v1"),
+            ),
+            TransferRecoveryEvent {
+                custody_event_id: event_id.clone(),
+                unit_id,
+                actor: bank_id.clone(),
+                recovery_reason: 1, // 1 = transfer_cancelled (rollback after expiry)
+                previous_custody_status: CustodyStatus::Pending,
+                new_custody_status: CustodyStatus::Recovered,
+                unit_status_after_recovery: BloodStatus::Reserved,
+                recovery_timestamp: current_time,
+            },
+        );
+
+        // Emit legacy event for backward compatibility
         env.events().publish(
             (
                 symbol_short!("blood"),
