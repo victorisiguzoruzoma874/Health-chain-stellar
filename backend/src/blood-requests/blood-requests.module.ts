@@ -27,6 +27,8 @@ import { InventoryStockEntity } from '../inventory/entities/inventory-stock.enti
 
 import { BloodRequestChainService } from './services/blood-request-chain.service';
 import { BloodRequestEmailService } from './services/blood-request-email.service';
+import { SagaCoordinatorService } from './services/saga-coordinator.service';
+import { BloodRequestSagaEntity } from './entities/blood-request-saga.entity';
 
 @Module({
   imports: [
@@ -34,6 +36,7 @@ import { BloodRequestEmailService } from './services/blood-request-email.service
       BloodRequestEntity,
       BloodRequestItemEntity,
       BloodRequestReservationEntity,
+      BloodRequestSagaEntity,
       InventoryStockEntity,
       OrganizationEntity,
     ]),
@@ -71,6 +74,7 @@ import { BloodRequestEmailService } from './services/blood-request-email.service
     BloodBankAvailabilityService,
     BloodRequestReservationService,
     TriageScoringService,
+    SagaCoordinatorService,
   ],
   exports: [
     BloodRequestsService,
@@ -78,6 +82,7 @@ import { BloodRequestEmailService } from './services/blood-request-email.service
     BloodBankAvailabilityService,
     BloodRequestReservationService,
     TriageScoringService,
+    SagaCoordinatorService,
   ],
 })
 export class BloodRequestsModule {}
