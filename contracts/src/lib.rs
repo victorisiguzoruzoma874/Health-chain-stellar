@@ -585,6 +585,36 @@ pub struct NominationEntry {
     pub nominated_at: u64,
 }
 
+/// Emitted when the current admin proposes a new admin (nomination created or replaced).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminProposedEvent {
+    pub current_admin: Address,
+    pub proposed_admin: Address,
+    /// Ledger timestamp when the nomination was created.
+    pub nominated_at: u64,
+    /// Ledger timestamp after which the nomination expires (nominated_at + NOMINATION_EXPIRY_SECONDS).
+    pub expires_at: u64,
+}
+
+/// Emitted when the nominated admin accepts and the transfer completes.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminTransferredEvent {
+    pub previous_admin: Address,
+    pub new_admin: Address,
+    pub transferred_at: u64,
+}
+
+/// Emitted when the current admin cancels a pending nomination.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminNominationCancelledEvent {
+    pub cancelled_by: Address,
+    pub cancelled_nominee: Address,
+    pub cancelled_at: u64,
+}
+
 /// Organization record for verification tracking.
 #[contracttype]
 #[derive(Clone)]
@@ -3302,6 +3332,7 @@ impl HealthChainContract {
     /// Nominate a new SuperAdmin (current admin only).
     ///
     /// Clears any expired pending nomination before checking for an active one.
+    /// Emits `AdminProposedEvent` on success.
     pub fn nominate_super_admin(env: Env, nominee: Address) -> Result<(), Error> {
         let admin: Address = env
             .storage()
@@ -3328,16 +3359,28 @@ impl HealthChainContract {
         env.storage().instance().set(
             &DataKey::PendingNominee,
             &NominationEntry {
-                nominee,
+                nominee: nominee.clone(),
                 nominated_at: now,
             },
         );
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("proposed")),
+            AdminProposedEvent {
+                current_admin: admin,
+                proposed_admin: nominee,
+                nominated_at: now,
+                expires_at: now.saturating_add(NOMINATION_EXPIRY_SECONDS),
+            },
+        );
+
         Ok(())
     }
 
     /// Accept a pending SuperAdmin nomination (nominee only).
     ///
     /// Fails with `NominationExpired` if the 24-hour window has passed.
+    /// Emits `AdminTransferredEvent` on success.
     pub fn accept_super_admin(env: Env) -> Result<(), Error> {
         let entry: NominationEntry = env
             .storage()
@@ -3352,12 +3395,29 @@ impl HealthChainContract {
             return Err(Error::NominationExpired);
         }
 
+        let previous_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(Error::Unauthorized)?;
+
         env.storage().instance().set(&ADMIN, &entry.nominee);
         env.storage().instance().remove(&DataKey::PendingNominee);
+
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("xfer")),
+            AdminTransferredEvent {
+                previous_admin,
+                new_admin: entry.nominee,
+                transferred_at: now,
+            },
+        );
+
         Ok(())
     }
 
     /// Cancel a pending nomination (current admin only).
+    /// Emits `AdminNominationCancelledEvent` if a nomination was present.
     pub fn cancel_nomination(env: Env) -> Result<(), Error> {
         let admin: Address = env
             .storage()
@@ -3366,8 +3426,37 @@ impl HealthChainContract {
             .ok_or(Error::Unauthorized)?;
         admin.require_auth();
 
-        env.storage().instance().remove(&DataKey::PendingNominee);
+        if let Some(entry) = env
+            .storage()
+            .instance()
+            .get::<DataKey, NominationEntry>(&DataKey::PendingNominee)
+        {
+            env.storage().instance().remove(&DataKey::PendingNominee);
+            env.events().publish(
+                (symbol_short!("admin"), symbol_short!("nom_cxl")),
+                AdminNominationCancelledEvent {
+                    cancelled_by: admin,
+                    cancelled_nominee: entry.nominee,
+                    cancelled_at: env.ledger().timestamp(),
+                },
+            );
+        }
+
         Ok(())
+    }
+
+    /// Propose a new admin (canonical alias for `nominate_super_admin`).
+    ///
+    /// Requires auth from the current admin. Emits `AdminProposedEvent`.
+    pub fn propose_admin(env: Env, proposed: Address) -> Result<(), Error> {
+        Self::nominate_super_admin(env, proposed)
+    }
+
+    /// Accept a pending admin proposal (canonical alias for `accept_super_admin`).
+    ///
+    /// Requires auth from the proposed admin. Emits `AdminTransferredEvent`.
+    pub fn accept_admin(env: Env) -> Result<(), Error> {
+        Self::accept_super_admin(env)
     }
 
     /// Store a health record hash
@@ -7065,6 +7154,140 @@ mod test {
         // Second nomination while the first is still active must fail.
         env.mock_all_auths();
         client.nominate_super_admin(&nominee_b);
+    }
+
+    #[test]
+    fn test_nominate_super_admin_emits_admin_proposed_event() {
+        let env = Env::default();
+        env.ledger().with_mut(|li| li.timestamp = 1_000_000);
+        let (_, _admin, client) = setup_contract_with_admin(&env);
+        let nominee = Address::generate(&env);
+
+        env.mock_all_auths();
+        client.nominate_super_admin(&nominee);
+
+        let events = env.events().all();
+        // Find the admin.proposed event (last event emitted).
+        let (_, topics, data) = events.last().unwrap();
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            symbol_short!("admin")
+        );
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            symbol_short!("proposed")
+        );
+        let event = AdminProposedEvent::try_from_val(&env, &data).unwrap();
+        assert_eq!(event.proposed_admin, nominee);
+        assert_eq!(event.nominated_at, 1_000_000);
+        assert_eq!(event.expires_at, 1_000_000 + NOMINATION_EXPIRY_SECONDS);
+    }
+
+    #[test]
+    fn test_accept_super_admin_emits_admin_transferred_event() {
+        let env = Env::default();
+        env.ledger().with_mut(|li| li.timestamp = 1_000_000);
+        let (_, admin, client) = setup_contract_with_admin(&env);
+        let nominee = Address::generate(&env);
+
+        env.mock_all_auths();
+        client.nominate_super_admin(&nominee);
+
+        env.mock_all_auths();
+        client.accept_super_admin();
+
+        let events = env.events().all();
+        let (_, topics, data) = events.last().unwrap();
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            symbol_short!("admin")
+        );
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            symbol_short!("xfer")
+        );
+        let event = AdminTransferredEvent::try_from_val(&env, &data).unwrap();
+        assert_eq!(event.previous_admin, admin);
+        assert_eq!(event.new_admin, nominee);
+        assert_eq!(event.transferred_at, 1_000_000);
+    }
+
+    #[test]
+    fn test_cancel_nomination_emits_cancelled_event() {
+        let env = Env::default();
+        env.ledger().with_mut(|li| li.timestamp = 1_000_000);
+        let (_, _admin, client) = setup_contract_with_admin(&env);
+        let nominee = Address::generate(&env);
+
+        env.mock_all_auths();
+        client.nominate_super_admin(&nominee);
+
+        env.mock_all_auths();
+        client.cancel_nomination();
+
+        let events = env.events().all();
+        let (_, topics, data) = events.last().unwrap();
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            symbol_short!("admin")
+        );
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            symbol_short!("nom_cxl")
+        );
+        let event = AdminNominationCancelledEvent::try_from_val(&env, &data).unwrap();
+        assert_eq!(event.cancelled_nominee, nominee);
+    }
+
+    #[test]
+    fn test_cancel_nomination_no_op_when_no_pending_nomination() {
+        let env = Env::default();
+        let (_, _admin, client) = setup_contract_with_admin(&env);
+
+        env.mock_all_auths();
+        // Should succeed without error even when nothing is pending.
+        client.cancel_nomination();
+    }
+
+    #[test]
+    fn test_propose_admin_alias_works_and_emits_event() {
+        let env = Env::default();
+        env.ledger().with_mut(|li| li.timestamp = 2_000_000);
+        let (_, _admin, client) = setup_contract_with_admin(&env);
+        let new_admin = Address::generate(&env);
+
+        env.mock_all_auths();
+        client.propose_admin(&new_admin);
+
+        let events = env.events().all();
+        let (_, topics, _) = events.last().unwrap();
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            symbol_short!("admin")
+        );
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            symbol_short!("proposed")
+        );
+    }
+
+    #[test]
+    fn test_accept_admin_alias_completes_transfer() {
+        let env = Env::default();
+        let (_, _admin, client) = setup_contract_with_admin(&env);
+        let new_admin = Address::generate(&env);
+
+        env.mock_all_auths();
+        client.propose_admin(&new_admin);
+
+        env.mock_all_auths();
+        client.accept_admin();
+
+        // Verify new admin can exercise admin-only functions.
+        let bank = Address::generate(&env);
+        env.mock_all_auths();
+        client.register_blood_bank(&bank);
+        assert!(client.is_blood_bank(&bank));
     }
 
     // ── ORGANIZATION VERIFICATION TESTS ────────────────────────────────────────────────────

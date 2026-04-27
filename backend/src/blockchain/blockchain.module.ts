@@ -1,12 +1,14 @@
 import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { CompensationModule } from '../common/compensation/compensation.module';
 
 import { BlockchainController } from './controllers/blockchain.controller';
 import { FailedSorobanTxEntity } from './entities/failed-soroban-tx.entity';
+import { OnChainTxStateEntity } from './entities/on-chain-tx-state.entity';
 import { AdminGuard } from './guards/admin.guard';
 import { JobDeduplicationPlugin } from './plugins/job-deduplication.plugin';
 import { SorobanDlqProcessor } from './processors/soroban-dlq.processor';
@@ -21,7 +23,8 @@ import { SorobanService } from './services/soroban.service';
 @Module({
   imports: [
     CompensationModule,
-    TypeOrmModule.forFeature([FailedSorobanTxEntity]),
+    EventEmitterModule.forRoot(),
+    TypeOrmModule.forFeature([FailedSorobanTxEntity, OnChainTxStateEntity]),
     BullModule.registerQueueAsync(
       {
         name: 'soroban-tx-queue',
